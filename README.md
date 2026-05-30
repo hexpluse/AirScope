@@ -16,7 +16,7 @@ A wireless recon automation tool that parses airodump-ng CSV output into actiona
     git clone https://github.com/hexpluse/airscope.git
     cd airscope
 
-No dependencies — uses only Python standard libraries.
+No dependencies - uses only Python standard libraries.
 
 ## Usage
 
