@@ -3,6 +3,25 @@ import sys
 import argparse
 from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt
 
+def load_oui(filepath="oui.txt"):
+	"""Load OUI database into a lookup dictionary"""
+	oui_db = {}
+	try:
+		with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+			for line in f:
+				if "(hex)" in line:
+					parts = line.split("(hex)")
+					prefix = parts[0].strip().replace("-", ":").upper()
+					vendor = parts[1].strip()
+					oui_db[prefix] = vendor
+	except FileNotFoundError:
+		print("  Warning: oui.txt not found — run with OUI database for vendor detection")
+	return oui_db
+
+def lookup_vendor(mac, oui_db):
+	"""Look up vendor from MAC address using OUI database"""
+	prefix = mac.upper()[:8]
+	return oui_db.get(prefix, "Unknown vendor")
 
 print("AirScope starting...")
 
@@ -118,7 +137,7 @@ def enrich_from_pcap(filepath, aps):
 			elt = elt.payload if hasattr(elt, 'payload') and isinstance(elt.payload, Dot11Elt) else None
 	return aps
 
-def display_results(aps, clients):
+def display_results(aps, clients, oui_db):
     """Print a clean recon summary"""
     print("=" * 50)
     print("  AirScope — Wireless Recon Summary")
@@ -130,13 +149,14 @@ def display_results(aps, clients):
         ap_clients = [c for c in clients if c["bssid"] == ap["bssid"]]
 
         print(f"[{i}] {ap['essid']}")
-        print(f"    BSSID:    {ap['bssid']}")
+        vendor = lookup_vendor(ap['bssid'], oui_db)
+        print(f"    BSSID:    {ap['bssid']} ({vendor})")
         print(f"    Channel:  {ap['channel']}")
         print(f"    Encrypt:  {ap['encryption']} {ap['cipher']} {ap['auth']}")
         print(f"    Clients:  {len(ap_clients)}")
 
         for c in ap_clients:
-            print(f"              └─ {c['mac']}")
+            print(f"              └─ {c['mac']} ({lookup_vendor(c['mac'], oui_db)})")
             if c["probes"]:
                 print(f"                 Probes: {c['probes']}")
 
@@ -186,13 +206,15 @@ def display_stats(aps, clients):
 	print(f"    Associated:    {associated}")
 	print(f"    Probing:       {probing}")
       
-def display_alerts(aps, clients, show_bssid=False):
+def display_alerts(aps, clients, show_bssid=False, oui_db={}):
 	"""Flag security weaknesses, sorted by priority"""
 	
 	alerts = []
 	
 	for ap in aps:
+		vendor = lookup_vendor(ap["bssid"], oui_db)
 		name = ap["essid"] if ap["essid"] else "Hidden (" + ap["bssid"] + ")"
+		vendor_line = f"\n       └─ Vendor: {vendor}" if vendor != "Unknown vendor" else ""
 		enc = ap["encryption"]
 		auth = ap["auth"]
 		ch = ap["channel"]
@@ -203,15 +225,15 @@ def display_alerts(aps, clients, show_bssid=False):
 		bssid_info = f" [{ap['bssid']}]" if show_bssid else ""
 		
 		if "OPN" in enc:
-			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}) — OPEN → Evil twin / sniffing"))
+			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}) — OPEN → Evil twin / sniffing{vendor_line}"))
 		elif "WPA" in enc and "WPA2" not in enc:
-			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}) — Legacy WPA → Capture + crack"))
+			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}) — Legacy WPA → Capture + crack{vendor_line}"))
 		elif "SAE" in auth and "PSK" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Transition → Downgrade | MFP: {mfp}"))
+			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Transition → Downgrade | MFP: {mfp}{vendor_line}"))
 		elif "SAE" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — SAE Solo → Wacker / Evil twin | MFP: {mfp}"))
+			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — SAE Solo → Wacker / Evil twin | MFP: {mfp}{vendor_line}"))
 		elif "MGT" in auth:
-			alerts.append((3, f"  [*]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Enterprise → Fake RADIUS"))
+			alerts.append((3, f"  [*]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Enterprise → Fake RADIUS{vendor_line}"))
 	
 	# Sort by priority number — 1 first, 3 last
 	alerts.sort(key=lambda x: x[0])
@@ -237,7 +259,8 @@ def display_alerts(aps, clients, show_bssid=False):
 		print("  Probing Clients")
 		print("-" * 50)
 		for c in probing:
-			print(f"  [?]  {c['mac']} → Probing: {c['probes']}")
+			cv = lookup_vendor(c['mac'], oui_db)
+			print(f"  [?]  {c['mac']} ({cv}) → Probing: {c['probes']}")
 	
 	print()
 
@@ -256,6 +279,7 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 	
 	aps, clients = parse_airodump(args.file)
+	oui_db = load_oui()
 	
 	# Apply filters
 	filtered = aps
@@ -294,10 +318,10 @@ if __name__ == "__main__":
 		sys.stdout = DualOutput(original_stdout, buffer)
 	
 	if not args.alerts_only:
-		display_results(filtered, clients)
+		display_results(filtered, clients, oui_db)
 		display_stats(filtered, clients)
 	
-	display_alerts(filtered, clients, args.show_bssid)
+	display_alerts(filtered, clients, args.show_bssid, oui_db)
 	
 	# Save to file if requested
 	if args.output:
