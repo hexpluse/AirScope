@@ -1,6 +1,8 @@
 import csv
 import sys
 import argparse
+from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt
+
 
 print("AirScope starting...")
 
@@ -55,6 +57,67 @@ def parse_airodump(filepath):
 
     return aps, clients
 
+def enrich_from_pcap(filepath, aps):
+	"""Parse PCAP beacon frames to extract RSN info and MFP status"""
+	packets = rdpcap(filepath)
+	for pkt in packets:
+		if not pkt.haslayer(Dot11Beacon):
+			continue
+		bssid = pkt[Dot11].addr2.upper()
+		matching_ap = None
+		for ap in aps:
+			if ap["bssid"].upper() == bssid:
+				matching_ap = ap
+				break
+		if not matching_ap:
+			continue
+		if "mfp" in matching_ap:
+			continue
+		elt = pkt[Dot11Beacon].payload
+		while isinstance(elt, Dot11Elt):
+			if elt.ID == 48 and len(elt.info) >= 8:
+				rsn_bytes = elt.info
+				try:
+					offset = 2
+					offset += 4
+					pairwise_count = int.from_bytes(rsn_bytes[offset:offset+2], 'little')
+					offset += 2 + (pairwise_count * 4)
+					akm_count = int.from_bytes(rsn_bytes[offset:offset+2], 'little')
+					offset += 2
+					akm_types = []
+					for i in range(akm_count):
+						akm_suite = rsn_bytes[offset:offset+4]
+						akm_type_byte = akm_suite[3]
+						if akm_type_byte == 1:
+							akm_types.append("802.1X")
+						elif akm_type_byte == 2:
+							akm_types.append("PSK")
+						elif akm_type_byte == 6:
+							akm_types.append("802.1X-SHA256")
+						elif akm_type_byte == 8:
+							akm_types.append("SAE")
+						elif akm_type_byte == 18:
+							akm_types.append("OWE")
+						else:
+							akm_types.append(f"Unknown({akm_type_byte})")
+						offset += 4
+					matching_ap["akm_details"] = " + ".join(akm_types)
+					if offset + 2 <= len(rsn_bytes):
+						rsn_caps = int.from_bytes(rsn_bytes[offset:offset+2], 'little')
+						mfp_capable = bool(rsn_caps & 0x80)
+						mfp_required = bool(rsn_caps & 0x40)
+						if mfp_required:
+							matching_ap["mfp"] = "Required"
+						elif mfp_capable:
+							matching_ap["mfp"] = "Capable (not required)"
+						else:
+							matching_ap["mfp"] = "Disabled"
+				except (IndexError, ValueError):
+					matching_ap["mfp"] = "Parse error"
+					matching_ap["akm_details"] = "Parse error"
+			elt = elt.payload if hasattr(elt, 'payload') and isinstance(elt.payload, Dot11Elt) else None
+	return aps
+
 def display_results(aps, clients):
     """Print a clean recon summary"""
     print("=" * 50)
@@ -78,7 +141,6 @@ def display_results(aps, clients):
                 print(f"                 Probes: {c['probes']}")
 
         print()
-
 
 def display_stats(aps, clients):
 	"""Print Summaary Statistics"""
@@ -136,6 +198,7 @@ def display_alerts(aps, clients, show_bssid=False):
 		ch = ap["channel"]
 		ap_clients = [c for c in clients if c["bssid"] == ap["bssid"]]
 		cl = len(ap_clients)
+		mfp = ap.get("mfp", "Unknown — verify in Wireshark")
 		
 		bssid_info = f" [{ap['bssid']}]" if show_bssid else ""
 		
@@ -144,9 +207,9 @@ def display_alerts(aps, clients, show_bssid=False):
 		elif "WPA" in enc and "WPA2" not in enc:
 			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}) — Legacy WPA → Capture + crack"))
 		elif "SAE" in auth and "PSK" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Transition → Downgrade attack (verify MFP)"))
+			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Transition → Downgrade | MFP: {mfp}"))
 		elif "SAE" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — SAE Solo → Wacker / Evil twin"))
+			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — SAE Solo → Wacker / Evil twin | MFP: {mfp}"))
 		elif "MGT" in auth:
 			alerts.append((3, f"  [*]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Enterprise → Fake RADIUS"))
 	
@@ -158,6 +221,8 @@ def display_alerts(aps, clients, show_bssid=False):
 	print("-" * 50)
 	print("  ch = Channel | cl = Connected Clients")
 	print("  [!!] = Critical  [!] = Notable  [*] = Info  [?] = Investigate")
+	print("  MFP: Required = Deauth blocked | Capable/Disabled = Deauth viable")
+
 	print()
 	
 	for priority, message in alerts:
@@ -186,6 +251,7 @@ if __name__ == "__main__":
 	parser.add_argument("--alerts-only", action="store_true", help="Only show security alerts, skip AP listing")
 	parser.add_argument("--show-bssid", action="store_true", help="Include BSSID in alert output")
 	parser.add_argument("--output", help="Export results to a text file (e.g. --output report.txt)")
+	parser.add_argument("--pcap", help="PCAP file to enrich AP data with RSN/MFP details")
 
 	args = parser.parse_args()
 	
@@ -203,9 +269,12 @@ if __name__ == "__main__":
 	if args.transition:
 		filtered = [ap for ap in filtered if "SAE" in ap["auth"] and "PSK" in ap["auth"]]
 	
+	# Enrich with PCAP data if provided
 	if args.enterprise:
 		filtered = [ap for ap in filtered if "MGT" in ap["auth"]]
-	
+
+	if args.pcap:
+		filtered = enrich_from_pcap(args.pcap, filtered)
 	# Capture output if exporting
 	if args.output:
 		import io
