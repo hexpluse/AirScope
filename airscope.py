@@ -23,7 +23,22 @@ def lookup_vendor(mac, oui_db):
 	prefix = mac.upper()[:8]
 	return oui_db.get(prefix, "Unknown vendor")
 
-print("AirScope starting...")
+CHANNEL_FREQ = {
+	"1": 2412, "2": 2417, "3": 2422, "4": 2427,
+	"5": 2432, "6": 2437, "7": 2442, "8": 2447,
+	"9": 2452, "10": 2457, "11": 2462, "12": 2467,
+	"13": 2472, "14": 2484,
+	"36": 5180, "40": 5200, "44": 5220, "48": 5240,
+	"52": 5260, "56": 5280, "60": 5300, "64": 5320,
+	"100": 5500, "104": 5520, "108": 5540, "112": 5560,
+	"116": 5580, "120": 5600, "124": 5620, "128": 5640,
+	"132": 5660, "136": 5680, "140": 5700, "144": 5720,
+	"149": 5745, "153": 5765, "157": 5785, "161": 5805, "165": 5825
+}
+
+def parse_airodump(filepath):
+
+	print("AirScope starting...")
 
 def parse_airodump(filepath):
     """Parse airodump-ng CSV into APs and clients"""
@@ -77,7 +92,7 @@ def parse_airodump(filepath):
     return aps, clients
 
 def enrich_from_pcap(filepath, aps):
-	"""Parse PCAP beacon frames to extract RSN info and MFP status"""
+	"""Parse PCAP beacon frames to extract RSN info, MFP status, and WPS"""
 	packets = rdpcap(filepath)
 	for pkt in packets:
 		if not pkt.haslayer(Dot11Beacon):
@@ -90,11 +105,12 @@ def enrich_from_pcap(filepath, aps):
 				break
 		if not matching_ap:
 			continue
-		if "mfp" in matching_ap:
-			continue
 		elt = pkt[Dot11Beacon].payload
 		while isinstance(elt, Dot11Elt):
-			if elt.ID == 48 and len(elt.info) >= 8:
+			if elt.ID == 221 and len(elt.info) >= 4:
+				if elt.info[:4] == b'\x00\x50\xf2\x04':
+					matching_ap["wps"] = True
+			if elt.ID == 48 and len(elt.info) >= 8 and "mfp" not in matching_ap:
 				rsn_bytes = elt.info
 				try:
 					offset = 2
@@ -132,8 +148,7 @@ def enrich_from_pcap(filepath, aps):
 						else:
 							matching_ap["mfp"] = "Disabled"
 				except (IndexError, ValueError):
-					matching_ap["mfp"] = "Parse error"
-					matching_ap["akm_details"] = "Parse error"
+					pass
 			elt = elt.payload if hasattr(elt, 'payload') and isinstance(elt.payload, Dot11Elt) else None
 	return aps
 
@@ -151,7 +166,8 @@ def display_results(aps, clients, oui_db):
         print(f"[{i}] {ap['essid']}")
         vendor = lookup_vendor(ap['bssid'], oui_db)
         print(f"    BSSID:    {ap['bssid']} ({vendor})")
-        print(f"    Channel:  {ap['channel']}")
+        freq = CHANNEL_FREQ.get(ap['channel'], "?")
+        print(f"    Channel:  {ap['channel']} ({freq} MHz)")
         print(f"    Encrypt:  {ap['encryption']} {ap['cipher']} {ap['auth']}")
         print(f"    Clients:  {len(ap_clients)}")
 
@@ -218,22 +234,28 @@ def display_alerts(aps, clients, show_bssid=False, oui_db={}):
 		enc = ap["encryption"]
 		auth = ap["auth"]
 		ch = ap["channel"]
+		freq = CHANNEL_FREQ.get(ch, "?")
 		ap_clients = [c for c in clients if c["bssid"] == ap["bssid"]]
 		cl = len(ap_clients)
 		mfp = ap.get("mfp", "Unknown — verify in Wireshark")
 		
 		bssid_info = f" [{ap['bssid']}]" if show_bssid else ""
+		vendor = lookup_vendor(ap["bssid"], oui_db)
+		vendor_line = f"\n       └─ Vendor: {vendor}" if vendor != "Unknown vendor" else ""
+		wps_flag = " | WPS: ENABLED → Pixie Dust / Reaver" if ap.get("wps") else ""
 		
 		if "OPN" in enc:
-			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}) — OPEN → Evil twin / sniffing{vendor_line}"))
+			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}/{freq}MHz) — OPEN → Evil twin / sniffing{vendor_line}"))
 		elif "WPA" in enc and "WPA2" not in enc:
-			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}) — Legacy WPA → Capture + crack{vendor_line}"))
+			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}/{freq}MHz) — Legacy WPA → Capture + crack{wps_flag}{vendor_line}"))
 		elif "SAE" in auth and "PSK" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Transition → Downgrade | MFP: {mfp}{vendor_line}"))
+			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — Transition → Downgrade | MFP: {mfp}{wps_flag}{vendor_line}"))
 		elif "SAE" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — SAE Solo → Wacker / Evil twin | MFP: {mfp}{vendor_line}"))
+			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — SAE Solo → Wacker / Evil twin | MFP: {mfp}{vendor_line}"))
 		elif "MGT" in auth:
-			alerts.append((3, f"  [*]  {name}{bssid_info} (ch:{ch}), (cl:{cl}) — Enterprise → Fake RADIUS{vendor_line}"))
+			alerts.append((3, f"  [*]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — Enterprise → Fake RADIUS{vendor_line}"))
+		elif "WPA2" in enc and "PSK" in auth and ap.get("wps"):
+			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — WPA2-PSK + WPS ENABLED → Pixie Dust / Reaver{vendor_line}"))
 	
 	# Sort by priority number — 1 first, 3 last
 	alerts.sort(key=lambda x: x[0])
@@ -275,6 +297,7 @@ if __name__ == "__main__":
 	parser.add_argument("--show-bssid", action="store_true", help="Include BSSID in alert output")
 	parser.add_argument("--output", help="Export results to a text file (e.g. --output report.txt)")
 	parser.add_argument("--pcap", help="PCAP file to enrich AP data with RSN/MFP details")
+	parser.add_argument("--freq", action="store_true", help="Show frequency alongside channel number")
 
 	args = parser.parse_args()
 	
