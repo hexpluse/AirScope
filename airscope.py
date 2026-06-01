@@ -218,7 +218,65 @@ def display_stats(aps, clients):
 	print(f"  Total Clients:   {len(clients)}")
 	print(f"    Associated:    {associated}")
 	print(f"    Probing:       {probing}")
-      
+
+def display_target(aps, clients, target, oui_db):
+	"""Display detailed info for a specific AP target"""
+	ap = None
+	for a in aps:
+		if a["essid"].upper() == target.upper():
+			ap = a
+			break
+	
+	if not ap:
+		print(f"  Error: Target '{target}' not found.")
+		return
+	
+	vendor = lookup_vendor(ap["bssid"], oui_db)
+	freq = CHANNEL_FREQ.get(ap["channel"], "?")
+	mfp = ap.get("mfp", "Unknown — verify in Wireshark")
+	wps = "Enabled" if ap.get("wps") else "Not detected"
+	ap_clients = [c for c in clients if c["bssid"] == ap["bssid"]]
+	
+	auth = ap["auth"]
+	enc = ap["encryption"]
+	if "OPN" in enc:
+		attack = "Evil Twin / Sniffing (Open Network)"
+	elif "SAE" in auth and "PSK" in auth:
+		attack = "SAE Downgrade (Transition Mode)"
+	elif "SAE" in auth:
+		attack = "Online Brute-Force (Wacker) or SAE Collider Evil Twin"
+	elif "MGT" in auth:
+		attack = "Evil Twin + Fake RADIUS (Enterprise)"
+	elif "WPA2" in enc and ap.get("wps"):
+		attack = "WPS Attack (Pixie Dust / Reaver)"
+	elif "WPA2" in enc:
+		attack = "Deauth + Capture Handshake + Hashcat"
+	else:
+		attack = "Manual analysis needed"
+	
+	print()
+	print(f"  ── TARGET INFO ─────────────────────────────")
+	print(f"  SSID:        {ap['essid'] if ap['essid'] else 'Hidden'}")
+	print(f"  BSSID:       {ap['bssid']}")
+	print(f"  Channel:     {ap['channel']}")
+	print(f"  Frequency:   {freq} MHz")
+	print(f"  Signal:      {ap['power']} dBm")
+	print(f"  Encryption:  {enc} {ap['cipher']}")
+	print(f"  Auth:        {auth}")
+	print(f"  MFP:         {mfp}")
+	print(f"  WPS:         {wps}")
+	print(f"  Vendor:      {vendor}")
+	print(f"  Attack:      {attack}")
+	print()
+	
+	if ap_clients:
+		print(f"  ── CLIENTS ({len(ap_clients)}) ────────────────────────────")
+		for c in ap_clients:
+			cv = lookup_vendor(c['mac'], oui_db)
+			probe_info = f" → Probes: {c['probes']}" if c.get("probes") else ""
+			print(f"  {c['mac']} ({cv}){probe_info}")
+		print()
+
 def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False):
 	"""Flag security weaknesses, sorted by priority"""
 	
@@ -315,6 +373,7 @@ if __name__ == "__main__":
 	parser.add_argument("--output", help="Export results to a text file (e.g. --output report.txt)")
 	parser.add_argument("--pcap", help="PCAP file to enrich AP data with RSN/MFP details")
 	parser.add_argument("--show-clients", action="store_true", help="Show connected client details in alerts")
+	parser.add_argument("--target", help="Show detailed info for AP by SSID name")
 
 	args = parser.parse_args()
 	
@@ -360,11 +419,14 @@ if __name__ == "__main__":
 		
 		sys.stdout = DualOutput(original_stdout, buffer)
 	
-	if not args.alerts_only:
+	if args.target:
+		display_target(filtered, clients, args.target, oui_db)
+	elif not args.alerts_only:
 		display_results(filtered, clients, oui_db)
 		display_stats(filtered, clients)
 	
-	display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+	if not args.target:
+		display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
 	
 	# Save to file if requested
 	if args.output:
