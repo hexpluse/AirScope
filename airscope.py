@@ -1,4 +1,3 @@
-import csv
 import sys
 import argparse
 from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt
@@ -37,10 +36,6 @@ CHANNEL_FREQ = {
 }
 
 def parse_airodump(filepath):
-
-	print("AirScope starting...")
-
-def parse_airodump(filepath):
     """Parse airodump-ng CSV into APs and clients"""
     aps = []
     clients = []
@@ -74,6 +69,7 @@ def parse_airodump(filepath):
                     "encryption": row[5],
                     "cipher": row[6],
                     "auth": row[7],
+                    "power": row[8] if len(row) > 8 else "0",
                     "essid": row[13],
                 }
                 aps.append(ap)
@@ -168,6 +164,7 @@ def display_results(aps, clients, oui_db):
         print(f"    BSSID:    {ap['bssid']} ({vendor})")
         freq = CHANNEL_FREQ.get(ap['channel'], "?")
         print(f"    Channel:  {ap['channel']} ({freq} MHz)")
+        print(f"    Signal:   {ap['power']} dBm")
         print(f"    Encrypt:  {ap['encryption']} {ap['cipher']} {ap['auth']}")
         print(f"    Clients:  {len(ap_clients)}")
 
@@ -179,7 +176,7 @@ def display_results(aps, clients, oui_db):
         print()
 
 def display_stats(aps, clients):
-	"""Print Summaary Statistics"""
+	"""Print Summary Statistics"""
 	
 	wpa3_count = 0
 	wpa2_count = 0
@@ -222,69 +219,89 @@ def display_stats(aps, clients):
 	print(f"    Associated:    {associated}")
 	print(f"    Probing:       {probing}")
       
-def display_alerts(aps, clients, show_bssid=False, oui_db={}):
+def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False):
 	"""Flag security weaknesses, sorted by priority"""
 	
 	alerts = []
 	
 	for ap in aps:
-		vendor = lookup_vendor(ap["bssid"], oui_db)
-		name = ap["essid"] if ap["essid"] else "Hidden (" + ap["bssid"] + ")"
-		vendor_line = f"\n       └─ Vendor: {vendor}" if vendor != "Unknown vendor" else ""
+		bssid_info = f" [{ap['bssid']}]" if show_bssid else ""
+		if ap["essid"]:
+			name = ap["essid"]
+		else:
+			name = "Hidden (" + ap["bssid"] + ")"
+			bssid_info = ""
 		enc = ap["encryption"]
 		auth = ap["auth"]
 		ch = ap["channel"]
 		freq = CHANNEL_FREQ.get(ch, "?")
+		pwr = ap.get("power", "?")
 		ap_clients = [c for c in clients if c["bssid"] == ap["bssid"]]
 		cl = len(ap_clients)
 		mfp = ap.get("mfp", "Unknown — verify in Wireshark")
-		
-		bssid_info = f" [{ap['bssid']}]" if show_bssid else ""
 		vendor = lookup_vendor(ap["bssid"], oui_db)
 		vendor_line = f"\n       └─ Vendor: {vendor}" if vendor != "Unknown vendor" else ""
-		wps_flag = " | WPS: ENABLED → Pixie Dust / Reaver" if ap.get("wps") else ""
+		wps_line = "\n       → WPS ENABLED → Pixie Dust / Reaver" if ap.get("wps") else ""
+		client_lines = ""
+		if show_clients and ap_clients:
+			for c in ap_clients:
+				cv = lookup_vendor(c['mac'], oui_db)
+				client_lines += f"\n       ├─ Client: {c['mac']} ({cv})"
+				if c.get("probes"):
+					client_lines += f" → Probes: {c['probes']}"
+		
+		meta = f"       ch:{ch} | {freq}MHz | {pwr}dBm | {cl} client(s)"
 		
 		if "OPN" in enc:
-			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}/{freq}MHz) — OPEN → Evil twin / sniffing{vendor_line}"))
+			alert_text = f"  [!!] {name}{bssid_info}\n{meta}\n       → OPEN → Evil twin / sniffing{vendor_line}{client_lines}"
+			alerts.append((1, alert_text))
 		elif "WPA" in enc and "WPA2" not in enc:
-			alerts.append((1, f"  [!!] {name}{bssid_info} (ch:{ch}/{freq}MHz) — Legacy WPA → Capture + crack{wps_flag}{vendor_line}"))
+			alert_text = f"  [!!] {name}{bssid_info}\n{meta}\n       → Legacy WPA → Capture + crack{wps_line}{vendor_line}{client_lines}"
+			alerts.append((1, alert_text))
 		elif "SAE" in auth and "PSK" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — Transition → Downgrade | MFP: {mfp}{wps_flag}{vendor_line}"))
+			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → Transition → Downgrade | MFP: {mfp}{wps_line}{vendor_line}{client_lines}"
+			alerts.append((2, alert_text))
 		elif "SAE" in auth:
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — SAE Solo → Wacker / Evil twin | MFP: {mfp}{vendor_line}"))
+			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → SAE Solo → Wacker / Evil twin | MFP: {mfp}{vendor_line}{client_lines}"
+			alerts.append((2, alert_text))
 		elif "MGT" in auth:
-			alerts.append((3, f"  [*]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — Enterprise → Fake RADIUS{vendor_line}"))
+			alert_text = f"  [*]  {name}{bssid_info}\n{meta}\n       → Enterprise → Fake RADIUS{vendor_line}{client_lines}"
+			alerts.append((3, alert_text))
 		elif "WPA2" in enc and "PSK" in auth and ap.get("wps"):
-			alerts.append((2, f"  [!]  {name}{bssid_info} (ch:{ch}/{freq}MHz), (cl:{cl}) — WPA2-PSK + WPS ENABLED → Pixie Dust / Reaver{vendor_line}"))
+			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → WPA2-PSK + WPS ENABLED → Pixie Dust / Reaver{vendor_line}{client_lines}"
+			alerts.append((2, alert_text))
 	
-	# Sort by priority number — 1 first, 3 last
 	alerts.sort(key=lambda x: x[0])
 	
 	print("-" * 50)
 	print("  Security Alerts")
 	print("-" * 50)
-	print("  ch = Channel | cl = Connected Clients")
-	print("  [!!] = Critical  [!] = Notable  [*] = Info  [?] = Investigate")
-	print("  MFP: Required = Deauth blocked | Capable/Disabled = Deauth viable")
-
+	print("  [!!] = Critical  [!] = Notable  [*] = Info")
+	print("  MFP: Required = Deauth blocked")
+	print("  MFP: Capable/Disabled = Deauth viable")
 	print()
+	
+	current_priority = None
+	priority_labels = {1: "CRITICAL", 2: "NOTABLE", 3: "INFORMATIONAL"}
 	
 	for priority, message in alerts:
+		if priority != current_priority:
+			current_priority = priority
+			label = priority_labels.get(priority, "OTHER")
+			print(f"  ── {label} {'─' * (40 - len(label))}")
+			print()
 		print(message)
+		print()
 	
-	print()
-	
-	# Probing clients - one line each
 	probing = [c for c in clients if "(not associated)" in c["bssid"] and c["probes"]]
 	if probing:
-		print("-" * 50)
-		print("  Probing Clients")
-		print("-" * 50)
+		print(f"  ── INVESTIGATE {'─' * 29}")
+		print()
 		for c in probing:
 			cv = lookup_vendor(c['mac'], oui_db)
-			print(f"  [?]  {c['mac']} ({cv}) → Probing: {c['probes']}")
-	
-	print()
+			print(f"  [?]  {c['mac']} ({cv})")
+			print(f"       → Probing: {c['probes']}")
+			print()
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="AirScope — Wireless Recon Parser made by yours truly")
@@ -297,7 +314,7 @@ if __name__ == "__main__":
 	parser.add_argument("--show-bssid", action="store_true", help="Include BSSID in alert output")
 	parser.add_argument("--output", help="Export results to a text file (e.g. --output report.txt)")
 	parser.add_argument("--pcap", help="PCAP file to enrich AP data with RSN/MFP details")
-	parser.add_argument("--freq", action="store_true", help="Show frequency alongside channel number")
+	parser.add_argument("--show-clients", action="store_true", help="Show connected client details in alerts")
 
 	args = parser.parse_args()
 	
@@ -306,6 +323,9 @@ if __name__ == "__main__":
 	
 	# Apply filters
 	filtered = aps
+
+	# Sort by signal strength (strongest first)
+	filtered.sort(key=lambda ap: int(ap["power"]) if ap["power"].lstrip('-').isdigit() else -100, reverse=True)
 	
 	if args.has_clients:
 		filtered = [ap for ap in filtered if any(c["bssid"] == ap["bssid"] for c in clients)]
@@ -344,7 +364,7 @@ if __name__ == "__main__":
 		display_results(filtered, clients, oui_db)
 		display_stats(filtered, clients)
 	
-	display_alerts(filtered, clients, args.show_bssid, oui_db)
+	display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
 	
 	# Save to file if requested
 	if args.output:
