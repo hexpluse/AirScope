@@ -121,7 +121,12 @@ def parse_airodump(filepath):
 
 def enrich_from_pcap(filepath, aps):
 	"""Parse PCAP beacon frames to extract RSN info, MFP status, and WPS"""
-	packets = rdpcap(filepath)
+	try:
+		packets = rdpcap(filepath)
+	except Exception as e:
+		print(f"  Warning: Could not read PCAP file — {e}")
+		print(f"  Continuing with CSV data only.")
+		return aps
 	for pkt in packets:
 		if not pkt.haslayer(Dot11Beacon):
 			continue
@@ -376,7 +381,6 @@ def display_stats(aps, clients):
 	wps_count = sum(1 for ap in aps if ap.get("wps"))
 	client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
 
-	print(f"  {len(aps)} APs  |  {opn_count} open  |  {wps_count} WPS  |  {hidden_count} hidden  |  {client_count} clients")
 	print("-" * 50)
 	print("  Summary")
 	print("-" * 50)
