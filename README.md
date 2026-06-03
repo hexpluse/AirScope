@@ -73,7 +73,7 @@ The strongest feature. Run `--target` against any AP by SSID name to get a full 
 python airscope.py capture.csv --pcap capture.cap --target NETWORK-NAME
 ```
 
-<img src="screenshots/target.png" width="700"/>
+<img src="screenshots/target.png" width="580"/>
 
 The attack field updates based on what was captured. If MFP is Required, deauth is flagged as blocked and the recommendation pivots. If a PMKID was captured, it switches to clientless offline cracking. If WPS is enabled, it goes straight to Pixie Dust.
 
@@ -85,7 +85,7 @@ The attack field updates based on what was captured. If MFP is Required, deauth 
 python airscope.py capture.csv --pcap capture.cap --alerts-only
 ```
 
-<img src="screenshots/alerts.png" width="700"/>
+<img src="screenshots/alerts.png" width="580"/>
 
 Alerts are sorted by priority. The color legend is shown at the top of every alerts run. Output is scoped to what matters — metadata is dimmed, attack recommendations are highlighted.
 
