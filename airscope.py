@@ -1,6 +1,24 @@
 import sys
 import argparse
 from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
+VERSION = "4.5.3"
+
+try:
+	from colorama import init, Fore, Style
+	init(autoreset=True)
+	C_RED     = Fore.RED
+	C_YELLOW  = Fore.YELLOW
+	C_BLUE    = Fore.BLUE
+	C_MAGENTA = Fore.MAGENTA
+	C_CYAN    = Fore.CYAN
+	C_ORANGE  = Fore.YELLOW
+	C_GREEN   = Fore.GREEN
+	C_DIM     = Style.DIM
+	C_BOLD    = Style.BRIGHT
+	C_RESET   = Style.RESET_ALL
+except ImportError:
+	C_RED = C_YELLOW = C_BLUE = C_MAGENTA = C_CYAN = C_ORANGE = C_GREEN = C_DIM = C_BOLD = C_RESET = ""
+	print("  Note: install colorama for color output (pip install colorama)")
 
 def load_oui(filepath="oui.txt"):
 	"""Load OUI database into a lookup dictionary"""
@@ -264,12 +282,12 @@ def display_hidden_correlation(findings, oui_db, show_all=False):
 		if f["type"] == "associated":
 			vendor = lookup_vendor(f["bssid"], oui_db)
 			freq = CHANNEL_FREQ.get(f["channel"], "?")
-			print(f"  [H]  Hidden AP — {f['bssid']} ({vendor})")
+			print(f"  {C_CYAN}[H]  Hidden AP — {f['bssid']}{C_RESET} ({vendor})")
 			print(f"       ch:{f['channel']} | {freq}MHz | {f['power']}dBm | {f['encryption']} {f['auth']}")
 
 			if f["candidate_ssids"]:
 				ssid_list = ", ".join(f["candidate_ssids"])
-				print(f"       → Likely SSID(s): {ssid_list}  [from associated client probes]")
+				print(f"       {C_CYAN}→ Likely SSID(s): {ssid_list}{C_RESET}  [from associated client probes]")
 			else:
 				print(f"       → No probe data from associated clients")
 
@@ -483,9 +501,9 @@ def display_target(aps, clients, target, oui_db):
 	else:
 		print(f"  Captive Portal: No signals detected")
 	print(f"  Vendor:      {vendor}")
-	print(f"  Attack:      {attack}")
+	print(f"  Attack:      {C_RED}{attack}{C_RESET}")
 	if attack_note:
-		print(f"  Note:        {attack_note}")
+		print(f"  Note:        {C_YELLOW}{attack_note}{C_RESET}")
 	print()
 
 	if ap_clients:
@@ -518,7 +536,7 @@ def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False
 		mfp = ap.get("mfp", "Unknown — verify in Wireshark")
 		vendor = lookup_vendor(ap["bssid"], oui_db)
 		vendor_line = f"\n       └─ Vendor: {vendor}" if vendor != "Unknown vendor" else ""
-		wps_line = "\n       → WPS ENABLED → Pixie Dust / Reaver" if ap.get("wps") else ""
+		wps_line = f"\n       {C_YELLOW}→ WPS ENABLED → Pixie Dust / Reaver{C_RESET}" if ap.get("wps") else ""
 		client_lines = ""
 		if show_clients and ap_clients:
 			for c in ap_clients:
@@ -536,25 +554,36 @@ def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False
 				portal_line = f"\n       → Captive Portal: {portal_confidence} (passive only — unconfirmed)\n         Signals: {reason_str}\n       → Consider: portal cloning / credential harvesting"
 			else:
 				portal_line = ""
-			alert_text = f"  [!!] {name}{bssid_info}\n{meta}\n       → OPEN → Evil twin / sniffing{portal_line}{vendor_line}{client_lines}"
+			alert_text = f"  {C_RED}[!!] {name}{bssid_info}{C_RESET}\n{meta}\n       {C_RED}→ OPEN → Evil twin / sniffing{C_RESET}{portal_line}{vendor_line}{client_lines}"
 			alerts.append((1, alert_text))
 		elif "WPA" in enc and "WPA2" not in enc:
-			alert_text = f"  [!!] {name}{bssid_info}\n{meta}\n       → Legacy WPA → Capture + crack{wps_line}{vendor_line}{client_lines}"
+			alert_text = f"  {C_RED}[!!] {name}{bssid_info}{C_RESET}\n{meta}\n       {C_RED}→ Legacy WPA → Capture + crack{C_RESET}{wps_line}{vendor_line}{client_lines}"
 			alerts.append((1, alert_text))
 		elif "SAE" in auth and "PSK" in auth:
-			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → Transition → Downgrade | MFP: {mfp}{wps_line}{vendor_line}{client_lines}"
+			alert_text = f"  {C_YELLOW}[!]  {name}{bssid_info}{C_RESET}\n{meta}\n       {C_YELLOW}→ Transition → Downgrade | MFP: {mfp}{C_RESET}{wps_line}{vendor_line}{client_lines}"
 			alerts.append((2, alert_text))
 		elif "SAE" in auth:
-			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → SAE Solo → Wacker / Evil twin | MFP: {mfp}{vendor_line}{client_lines}"
+			alert_text = f"  {C_YELLOW}[!]  {name}{bssid_info}{C_RESET}\n{meta}\n       {C_YELLOW}→ SAE Solo → Wacker / Evil twin | MFP: {mfp}{C_RESET}{vendor_line}{client_lines}"
 			alerts.append((2, alert_text))
 		elif "MGT" in auth:
-			alert_text = f"  [*]  {name}{bssid_info}\n{meta}\n       → Enterprise → Fake RADIUS{vendor_line}{client_lines}"
+			alert_text = f"  {C_BLUE}[*]  {name}{bssid_info}{C_RESET}\n{meta}\n       {C_BLUE}→ Enterprise → Fake RADIUS{C_RESET}{vendor_line}{client_lines}"
 			alerts.append((3, alert_text))
 		elif "WPA2" in enc and "PSK" in auth and ap.get("wps"):
-			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → WPA2-PSK + WPS ENABLED → Pixie Dust / Reaver{vendor_line}{client_lines}"
+			alert_text = f"  {C_YELLOW}[!]  {name}{bssid_info}{C_RESET}\n{meta}\n       {C_YELLOW}→ WPA2-PSK + WPS ENABLED → Pixie Dust / Reaver{C_RESET}{vendor_line}{client_lines}"
 			alerts.append((2, alert_text))
 		elif "WPA2" in enc and "PSK" in auth and ap.get("pmkid"):
-			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → WPA2-PSK + PMKID captured → Clientless crack (hashcat -m 22000){vendor_line}{client_lines}"
+			alert_text = f"  {C_YELLOW}[!]  {name}{bssid_info}{C_RESET}\n{meta}\n       {C_YELLOW}→ WPA2-PSK + PMKID captured → Clientless crack (hashcat -m 22000){C_RESET}{vendor_line}{client_lines}"
+			alerts.append((2, alert_text))
+		elif "WPA2" in enc and "PSK" in auth:
+			mfp_required = mfp == "Required"
+			mfp_unknown = "Unknown" in mfp
+			if mfp_required:
+				mfp_line = f"\n       {C_RED}→ MFP Required — deauth blocked | Consider: evil twin{C_RESET}"
+			elif mfp_unknown:
+				mfp_line = f"\n       {C_YELLOW}→ MFP Unknown — verify in Wireshark before attempting deauth{C_RESET}"
+			else:
+				mfp_line = f"\n       {C_YELLOW}→ Deauth + capture handshake | MFP: {mfp}{C_RESET}"
+			alert_text = f"  {C_YELLOW}[!]  {name}{bssid_info}{C_RESET}\n{meta}{mfp_line}{vendor_line}{client_lines}"
 			alerts.append((2, alert_text))
 
 	alerts.sort(key=lambda x: x[0])
@@ -562,9 +591,10 @@ def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False
 	print("-" * 50)
 	print("  Security Alerts")
 	print("-" * 50)
-	print("  [!!] = Critical  [!] = Notable  [*] = Info")
-	print("  MFP: Required = Deauth blocked")
-	print("  MFP: Capable/Disabled = Deauth viable")
+	print(f"  {C_RED}[!!]{C_RESET} = Critical (red)    {C_YELLOW}[!]{C_RESET} = Notable (yellow)    {C_BLUE}[*]{C_RESET} = Info (blue)")
+	print(f"  {C_MAGENTA}[?]{C_RESET}  = Investigate (magenta)    {C_CYAN}[H]{C_RESET} = Hidden correlation (cyan)")
+	print(f"  Attack recommendations shown in {C_RED}red{C_RESET}    WPS warnings shown in {C_YELLOW}orange{C_RESET}")
+	print(f"  MFP: Required = Deauth blocked    MFP: Capable/Disabled = Deauth viable")
 	print()
 
 	current_priority = None
@@ -574,23 +604,26 @@ def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False
 		if priority != current_priority:
 			current_priority = priority
 			label = priority_labels.get(priority, "OTHER")
-			print(f"  ── {label} {'─' * (40 - len(label))}")
+			label_colors = {1: C_RED, 2: C_YELLOW, 3: C_BLUE}
+			lc = label_colors.get(priority, C_RESET)
+			print(f"  ── {lc}{C_BOLD}{label}{C_RESET} {'─' * (40 - len(label))}")
 			print()
 		print(message)
 		print()
 
 	probing = [c for c in clients if "(not associated)" in c["bssid"] and c["probes"]]
 	if probing:
-		print(f"  ── INVESTIGATE {'─' * 29}")
+		print(f"  ── {C_MAGENTA}{C_BOLD}INVESTIGATE{C_RESET} {'─' * 29}")
 		print()
 		for c in probing:
 			cv = lookup_vendor(c['mac'], oui_db)
-			print(f"  [?]  {c['mac']} ({cv})")
-			print(f"       → Probing: {c['probes']}")
+			print(f"  {C_MAGENTA}[?]  {c['mac']}{C_RESET} ({cv})")
+			print(f"       {C_MAGENTA}→ Probing: {c['probes']}{C_RESET}")
 			print()
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="AirScope — Wireless Recon Parser made by yours truly")
+	parser.add_argument("--version", action="version", version=f"AirScope v{VERSION}")
 	parser.add_argument("file", help="Airodump-ng CSV file to parse")
 	parser.add_argument("--has-clients", action="store_true", help="Only show APs with connected clients")
 	parser.add_argument("--wpa2-only", action="store_true", help="Only show WPA2-PSK networks")
