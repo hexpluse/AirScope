@@ -1,6 +1,6 @@
 import sys
 import argparse
-from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt
+from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
 
 def load_oui(filepath="oui.txt"):
 	"""Load OUI database into a lookup dictionary"""
@@ -34,6 +34,23 @@ CHANNEL_FREQ = {
 	"132": 5660, "136": 5680, "140": 5700, "144": 5720,
 	"149": 5745, "153": 5765, "157": 5785, "161": 5805, "165": 5825
 }
+
+# Known captive portal SSID patterns — partial matches, case-insensitive
+CAPTIVE_PORTAL_SSIDS = [
+	"xfinitywifi", "xfinity", "boingo", "attwifi", "att wifi",
+	"twc wifi", "cablewifi", "_guest", "-guest", "guest_",
+	"passpoint", "hotspot", "_nomap", "hotel", "marriott",
+	"hilton", "hyatt", "airportnet", "airport wifi", "transit wifi",
+	"starbucks", "google starbucks", "united wifi", "delta wifi",
+	"southwest wifi", "aa inflight", "gogoinflight", "gogo inflight",
+]
+
+# Vendor OUI prefixes commonly associated with captive portal deployments
+# (hospitality controllers, carrier hotspot gear)
+CAPTIVE_PORTAL_VENDORS = [
+	"ruckus", "aruba", "cisco meraki", "meraki", "nomadix",
+	"aptilo", "cloud4wi", "purple wifi", "aislelabs",
+]
 
 def parse_airodump(filepath):
 	"""Parse airodump-ng CSV into APs and clients"""
@@ -104,6 +121,10 @@ def enrich_from_pcap(filepath, aps):
 			if elt.ID == 221 and len(elt.info) >= 4:
 				if elt.info[:4] == b'\x00\x50\xf2\x04':
 					matching_ap["wps"] = True
+			# 802.11u Interworking IE — AP is advertising network access policy
+			# Strongest passive signal for captive portal presence
+			if elt.ID == 107:
+				matching_ap["interworking"] = True
 			if elt.ID == 48 and len(elt.info) >= 8 and "mfp" not in matching_ap:
 				rsn_bytes = elt.info
 				try:
@@ -144,6 +165,33 @@ def enrich_from_pcap(filepath, aps):
 				except (IndexError, ValueError):
 					pass
 			elt = elt.payload if hasattr(elt, 'payload') and isinstance(elt.payload, Dot11Elt) else None
+
+	# Second pass — EAPOL frames for PMKID detection
+	# PMKID is in EAPOL message 1 of the 4-way handshake, key data field
+	# Format: RSN IE header (00:0f:ac:04) followed by 16-byte PMKID
+	for pkt in packets:
+		if not pkt.haslayer(EAPOL):
+			continue
+		try:
+			# AP is the source in message 1 (addr2 = transmitter)
+			ap_mac = pkt[Dot11].addr2.upper()
+			matching_ap = None
+			for ap in aps:
+				if ap["bssid"].upper() == ap_mac:
+					matching_ap = ap
+					break
+			if not matching_ap:
+				continue
+			if matching_ap.get("pmkid"):
+				continue
+			eapol_raw = bytes(pkt[EAPOL])
+			pmkid_marker = b'\x00\x0f\xac\x04'
+			marker_pos = eapol_raw.find(pmkid_marker)
+			if marker_pos != -1 and len(eapol_raw) >= marker_pos + 4 + 16:
+				matching_ap["pmkid"] = True
+		except Exception:
+			pass
+
 	return aps
 
 def correlate_hidden_ssids(aps, clients):
@@ -241,6 +289,47 @@ def display_hidden_correlation(findings, oui_db, show_all=False):
 			print()
 
 
+def captive_portal_signals(ap, oui_db):
+	"""
+	Assess passive signals that suggest a captive portal.
+	Returns (confidence, reasons) where confidence is
+	"Likely", "Possible", or None.
+
+	IMPORTANT: This is passive inference only. Confirmation
+	requires association. Never treat this as a confirmed finding.
+	"""
+	reasons = []
+
+	# Signal 1 — 802.11u Interworking IE present (strongest passive indicator)
+	if ap.get("interworking"):
+		reasons.append("802.11u Interworking IE detected")
+
+	# Signal 2 — SSID matches known captive portal patterns
+	essid = ap.get("essid", "").lower()
+	for pattern in CAPTIVE_PORTAL_SSIDS:
+		if pattern in essid:
+			reasons.append(f"SSID matches known portal pattern ({pattern})")
+			break
+
+	# Signal 3 — Vendor is known captive portal hardware/controller
+	vendor = lookup_vendor(ap["bssid"], oui_db).lower()
+	for v in CAPTIVE_PORTAL_VENDORS:
+		if v in vendor:
+			reasons.append(f"Vendor associated with portal deployments ({vendor})")
+			break
+
+	if not reasons:
+		return None, []
+
+	# 802.11u alone or with corroboration = Likely
+	# Pattern/vendor match only = Possible
+	if ap.get("interworking"):
+		confidence = "Likely"
+	else:
+		confidence = "Possible"
+
+	return confidence, reasons
+
 def display_results(aps, clients, oui_db):
 	"""Print a clean recon summary"""
 	print("=" * 50)
@@ -331,18 +420,45 @@ def display_target(aps, clients, target, oui_db):
 
 	auth = ap["auth"]
 	enc = ap["encryption"]
+	mfp_status = ap.get("mfp", "Unknown")
+	mfp_required = mfp_status == "Required"
+	mfp_unknown = mfp_status == "Unknown"
+
+	attack_note = ""
+
 	if "OPN" in enc:
 		attack = "Evil Twin / Sniffing (Open Network)"
 	elif "SAE" in auth and "PSK" in auth:
 		attack = "SAE Downgrade (Transition Mode)"
+		if mfp_required:
+			attack_note = "MFP Required — deauth blocked; evil twin or passive capture only"
+		elif mfp_unknown:
+			attack_note = "MFP status unknown — verify in Wireshark before attempting deauth"
 	elif "SAE" in auth:
 		attack = "Online Brute-Force (Wacker) or SAE Collider Evil Twin"
+		if mfp_required:
+			attack_note = "MFP Required — deauth blocked; evil twin approach recommended"
+		elif mfp_unknown:
+			attack_note = "MFP status unknown — verify in Wireshark before attempting deauth"
 	elif "MGT" in auth:
 		attack = "Evil Twin + Fake RADIUS (Enterprise)"
 	elif "WPA2" in enc and ap.get("wps"):
 		attack = "WPS Attack (Pixie Dust / Reaver)"
 	elif "WPA2" in enc:
-		attack = "Deauth + Capture Handshake + Hashcat"
+		if ap.get("pmkid") and mfp_required:
+			attack = "PMKID Crack (clientless) — hashcat -m 22000"
+			attack_note = "MFP Required (deauth blocked) but PMKID captured — offline crack viable without deauth"
+		elif ap.get("pmkid"):
+			attack = "PMKID Crack (clientless) — hashcat -m 22000"
+			attack_note = "No deauth or client required — PMKID captured from AP directly"
+		elif mfp_required:
+			attack = "Evil Twin (MFP Required — deauth blocked, handshake capture not viable)"
+			attack_note = "Switch to evil twin — deauth will not force client reconnect"
+		elif mfp_unknown:
+			attack = "Deauth + Capture Handshake + Hashcat"
+			attack_note = "MFP status unknown — verify in Wireshark; deauth may be blocked"
+		else:
+			attack = "Deauth + Capture Handshake + Hashcat"
 	else:
 		attack = "Manual analysis needed"
 
@@ -357,8 +473,19 @@ def display_target(aps, clients, target, oui_db):
 	print(f"  Auth:        {auth}")
 	print(f"  MFP:         {mfp}")
 	print(f"  WPS:         {wps}")
+	pmkid_status = "Captured — clientless crack viable (hashcat -m 22000)" if ap.get("pmkid") else "Not found in capture"
+	print(f"  PMKID:       {pmkid_status}")
+	portal_confidence, portal_reasons = captive_portal_signals(ap, oui_db)
+	if portal_confidence:
+		print(f"  Captive Portal: {portal_confidence} (passive only — unconfirmed)")
+		for r in portal_reasons:
+			print(f"               → {r}")
+	else:
+		print(f"  Captive Portal: No signals detected")
 	print(f"  Vendor:      {vendor}")
 	print(f"  Attack:      {attack}")
+	if attack_note:
+		print(f"  Note:        {attack_note}")
 	print()
 
 	if ap_clients:
@@ -403,7 +530,13 @@ def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False
 		meta = f"       ch:{ch} | {freq}MHz | {pwr}dBm | {cl} client(s)"
 
 		if "OPN" in enc:
-			alert_text = f"  [!!] {name}{bssid_info}\n{meta}\n       → OPEN → Evil twin / sniffing{vendor_line}{client_lines}"
+			portal_confidence, portal_reasons = captive_portal_signals(ap, oui_db)
+			if portal_confidence:
+				reason_str = "; ".join(portal_reasons)
+				portal_line = f"\n       → Captive Portal: {portal_confidence} (passive only — unconfirmed)\n         Signals: {reason_str}\n       → Consider: portal cloning / credential harvesting"
+			else:
+				portal_line = ""
+			alert_text = f"  [!!] {name}{bssid_info}\n{meta}\n       → OPEN → Evil twin / sniffing{portal_line}{vendor_line}{client_lines}"
 			alerts.append((1, alert_text))
 		elif "WPA" in enc and "WPA2" not in enc:
 			alert_text = f"  [!!] {name}{bssid_info}\n{meta}\n       → Legacy WPA → Capture + crack{wps_line}{vendor_line}{client_lines}"
@@ -419,6 +552,9 @@ def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False
 			alerts.append((3, alert_text))
 		elif "WPA2" in enc and "PSK" in auth and ap.get("wps"):
 			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → WPA2-PSK + WPS ENABLED → Pixie Dust / Reaver{vendor_line}{client_lines}"
+			alerts.append((2, alert_text))
+		elif "WPA2" in enc and "PSK" in auth and ap.get("pmkid"):
+			alert_text = f"  [!]  {name}{bssid_info}\n{meta}\n       → WPA2-PSK + PMKID captured → Clientless crack (hashcat -m 22000){vendor_line}{client_lines}"
 			alerts.append((2, alert_text))
 
 	alerts.sort(key=lambda x: x[0])
@@ -468,6 +604,7 @@ if __name__ == "__main__":
 	parser.add_argument("--target", help="Show detailed info for AP by SSID name")
 	parser.add_argument("--hidden", action="store_true", help="Show hidden SSID correlation — only APs where a likely SSID was identified. Combine with --alerts-only or --target.")
 	parser.add_argument("--hidden-all", action="store_true", help="Like --hidden, but also shows hidden APs with no associated clients (dead ends included). Use when you want the full hidden AP inventory.")
+	parser.add_argument("--pmkid", action="store_true", help="Only show APs where a PMKID was captured. Requires --pcap. Use to quickly identify clientless crack targets.")
 
 	args = parser.parse_args()
 
@@ -495,6 +632,9 @@ if __name__ == "__main__":
 	if args.pcap:
 		filtered = enrich_from_pcap(args.pcap, filtered)
 
+	if args.pmkid:
+		filtered = [ap for ap in filtered if ap.get("pmkid")]
+
 	# Capture output if exporting
 	if args.output:
 		import io
@@ -513,22 +653,33 @@ if __name__ == "__main__":
 
 		sys.stdout = DualOutput(original_stdout, buffer)
 
-	if args.target:
-		display_target(filtered, clients, args.target, oui_db)
-	elif not args.alerts_only and not args.hidden and not args.hidden_all:
-		display_results(filtered, clients, oui_db)
-		display_stats(filtered, clients)
+	# Determine what to show based on flag combinations
+	hidden_mode = args.hidden or args.hidden_all
 
-	if not args.target and not args.hidden and not args.hidden_all:
-		display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+	# If --pmkid filter produced no results, say so and exit cleanly
+	if args.pmkid and not filtered:
+		print("  No APs with captured PMKIDs found in this scan.")
+	else:
+		if args.target:
+			# --target: always show target info
+			display_target(filtered, clients, args.target, oui_db)
+		elif not args.alerts_only and not hidden_mode:
+			# Default: show full AP list and summary
+			display_results(filtered, clients, oui_db)
+			display_stats(filtered, clients)
 
-	if not args.target and args.alerts_only:
-		display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+		# Show alerts unless we're in hidden-only mode (without alerts-only pairing)
+		if not args.target and not hidden_mode:
+			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+		elif not args.target and hidden_mode and args.alerts_only:
+			# --hidden/--hidden-all paired with --alerts-only
+			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
 
-	if args.hidden or args.hidden_all:
-		hidden_findings = correlate_hidden_ssids(filtered, clients)
-		if hidden_findings:
-			display_hidden_correlation(hidden_findings, oui_db, show_all=args.hidden_all)
+		# Show hidden correlation if requested
+		if hidden_mode:
+			hidden_findings = correlate_hidden_ssids(filtered, clients)
+			if hidden_findings:
+				display_hidden_correlation(hidden_findings, oui_db, show_all=args.hidden_all)
 
 	# Save to file if requested
 	if args.output:
