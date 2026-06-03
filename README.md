@@ -153,7 +153,9 @@ Not found in capture does not mean the AP is not vulnerable. Whether a PMKID is 
 
 ## Version History
 
-- v4.5.3 — Color output via colorama with graceful fallback
+- v4.5.4 — scan summary header at top of full run with at-a-glance AP counts
+- v4.5.3 — color output via colorama with graceful fallback
+- v4.5.2 — fuzzy and BSSID targeting for --target
 - v4.5.1 — --version flag
 - v4.5 — MFP-aware deauth warnings in alerts
 - v4.4.1 — --pmkid filter flag
