@@ -420,15 +420,30 @@ def display_stats(aps, clients):
 
 def display_target(aps, clients, target, oui_db):
 	"""Display detailed info for a specific AP target"""
-	ap = None
-	for a in aps:
-		if a["essid"].upper() == target.upper():
-			ap = a
-			break
+	
+	is_bssid = len(target) == 17 and target.count(":") == 5
 
-	if not ap:
-		print(f"  Error: Target '{target}' not found.")
+	if is_bssid:
+		matches =[a for a in aps if a["bssid"].upper() == target.upper()]
+	else:
+	
+	# Tries Exact match first
+		matches = [a for a in aps if a["essid"].upper() == target.upper()]
+
+		# Fall back to Fuzzy if nothing hit
+		if not matches:
+			matches = [a for a in aps if target.upper() in a ["essid"].upper()]
+
+	if len(matches) == 0:
+		print(f"	Error: No AP matching '{target}' found.")
 		return
+	elif len(matches) > 1:
+		print(f"	Multiple matches for '{target}' - be more specific:")
+		for m in matches:
+			print(f"	{m['essid']} [{m['bssid']}]")
+		return
+	
+	ap = matches[0]
 
 	vendor = lookup_vendor(ap["bssid"], oui_db)
 	freq = CHANNEL_FREQ.get(ap["channel"], "?")
@@ -634,7 +649,7 @@ if __name__ == "__main__":
 	parser.add_argument("--output", help="Export results to a text file (e.g. --output report.txt)")
 	parser.add_argument("--pcap", help="PCAP file to enrich AP data with RSN/MFP details")
 	parser.add_argument("--show-clients", action="store_true", help="Show connected client details in alerts")
-	parser.add_argument("--target", help="Show detailed info for AP by SSID name")
+	parser.add_argument("--target", help="Target an AP by SSID name. Supports partial and exact matching. Lists all matches with BSSIDs if multiple found.")
 	parser.add_argument("--hidden", action="store_true", help="Show hidden SSID correlation — only APs where a likely SSID was identified. Combine with --alerts-only or --target.")
 	parser.add_argument("--hidden-all", action="store_true", help="Like --hidden, but also shows hidden APs with no associated clients (dead ends included). Use when you want the full hidden AP inventory.")
 	parser.add_argument("--pmkid", action="store_true", help="Only show APs where a PMKID was captured. Requires --pcap. Use to quickly identify clientless crack targets.")
