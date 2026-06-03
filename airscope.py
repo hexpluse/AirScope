@@ -1,7 +1,7 @@
 import sys
 import argparse
 from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
-VERSION = "4.5.3"
+VERSION = "4.5.4"
 
 try:
 	from colorama import init, Fore, Style
@@ -64,7 +64,6 @@ CAPTIVE_PORTAL_SSIDS = [
 ]
 
 # Vendor OUI prefixes commonly associated with captive portal deployments
-# (hospitality controllers, carrier hotspot gear)
 CAPTIVE_PORTAL_VENDORS = [
 	"ruckus", "aruba", "cisco meraki", "meraki", "nomadix",
 	"aptilo", "cloud4wi", "purple wifi", "aislelabs",
@@ -139,8 +138,6 @@ def enrich_from_pcap(filepath, aps):
 			if elt.ID == 221 and len(elt.info) >= 4:
 				if elt.info[:4] == b'\x00\x50\xf2\x04':
 					matching_ap["wps"] = True
-			# 802.11u Interworking IE — AP is advertising network access policy
-			# Strongest passive signal for captive portal presence
 			if elt.ID == 107:
 				matching_ap["interworking"] = True
 			if elt.ID == 48 and len(elt.info) >= 8 and "mfp" not in matching_ap:
@@ -184,14 +181,10 @@ def enrich_from_pcap(filepath, aps):
 					pass
 			elt = elt.payload if hasattr(elt, 'payload') and isinstance(elt.payload, Dot11Elt) else None
 
-	# Second pass — EAPOL frames for PMKID detection
-	# PMKID is in EAPOL message 1 of the 4-way handshake, key data field
-	# Format: RSN IE header (00:0f:ac:04) followed by 16-byte PMKID
 	for pkt in packets:
 		if not pkt.haslayer(EAPOL):
 			continue
 		try:
-			# AP is the source in message 1 (addr2 = transmitter)
 			ap_mac = pkt[Dot11].addr2.upper()
 			matching_ap = None
 			for ap in aps:
@@ -213,17 +206,7 @@ def enrich_from_pcap(filepath, aps):
 	return aps
 
 def correlate_hidden_ssids(aps, clients):
-	"""
-	Correlate hidden APs with client probe data to infer likely SSIDs.
-
-	Two correlation methods:
-	  1. Associated client: a client's BSSID matches a hidden AP — their probes
-	     likely name that network (high confidence).
-	  2. Orphan probe: a probing client's probe SSIDs don't match any visible AP —
-	     flagged as a possible hidden network probe (investigative).
-
-	Returns a list of finding dicts for display_hidden_correlation().
-	"""
+	"""Correlate hidden APs with client probe data to infer likely SSIDs."""
 	hidden_aps = [ap for ap in aps if not ap["essid"]]
 	if not hidden_aps:
 		return []
@@ -234,7 +217,6 @@ def correlate_hidden_ssids(aps, clients):
 		ap_bssid = ap["bssid"].upper()
 		associated_clients = [c for c in clients if c["bssid"].upper() == ap_bssid]
 
-		# Method 1: clients associated directly to the hidden AP
 		if associated_clients:
 			candidate_ssids = []
 			for c in associated_clients:
@@ -254,7 +236,6 @@ def correlate_hidden_ssids(aps, clients):
 				"candidate_ssids": candidate_ssids,
 			})
 		else:
-			# Hidden AP with no associated clients — record it for display
 			findings.append({
 				"type": "no_clients",
 				"bssid": ap["bssid"],
@@ -306,30 +287,19 @@ def display_hidden_correlation(findings, oui_db, show_all=False):
 			print(f"       → No associated clients — SSID cannot be inferred from this data")
 			print()
 
-
 def captive_portal_signals(ap, oui_db):
-	"""
-	Assess passive signals that suggest a captive portal.
-	Returns (confidence, reasons) where confidence is
-	"Likely", "Possible", or None.
-
-	IMPORTANT: This is passive inference only. Confirmation
-	requires association. Never treat this as a confirmed finding.
-	"""
+	"""Assess passive signals that suggest a captive portal."""
 	reasons = []
 
-	# Signal 1 — 802.11u Interworking IE present (strongest passive indicator)
 	if ap.get("interworking"):
 		reasons.append("802.11u Interworking IE detected")
 
-	# Signal 2 — SSID matches known captive portal patterns
 	essid = ap.get("essid", "").lower()
 	for pattern in CAPTIVE_PORTAL_SSIDS:
 		if pattern in essid:
 			reasons.append(f"SSID matches known portal pattern ({pattern})")
 			break
 
-	# Signal 3 — Vendor is known captive portal hardware/controller
 	vendor = lookup_vendor(ap["bssid"], oui_db).lower()
 	for v in CAPTIVE_PORTAL_VENDORS:
 		if v in vendor:
@@ -339,8 +309,6 @@ def captive_portal_signals(ap, oui_db):
 	if not reasons:
 		return None, []
 
-	# 802.11u alone or with corroboration = Likely
-	# Pattern/vendor match only = Possible
 	if ap.get("interworking"):
 		confidence = "Likely"
 	else:
@@ -405,6 +373,10 @@ def display_stats(aps, clients):
 		else:
 			associated += 1
 
+	wps_count = sum(1 for ap in aps if ap.get("wps"))
+	client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
+
+	print(f"  {len(aps)} APs  |  {opn_count} open  |  {wps_count} WPS  |  {hidden_count} hidden  |  {client_count} clients")
 	print("-" * 50)
 	print("  Summary")
 	print("-" * 50)
@@ -420,29 +392,28 @@ def display_stats(aps, clients):
 
 def display_target(aps, clients, target, oui_db):
 	"""Display detailed info for a specific AP target"""
-	
+
 	is_bssid = len(target) == 17 and target.count(":") == 5
 
 	if is_bssid:
-		matches =[a for a in aps if a["bssid"].upper() == target.upper()]
+		matches = [a for a in aps if a["bssid"].upper() == target.upper()]
 	else:
-	
-	# Tries Exact match first
+		# Try exact match first
 		matches = [a for a in aps if a["essid"].upper() == target.upper()]
 
-		# Fall back to Fuzzy if nothing hit
+		# Fall back to fuzzy if nothing found
 		if not matches:
-			matches = [a for a in aps if target.upper() in a ["essid"].upper()]
+			matches = [a for a in aps if target.upper() in a["essid"].upper()]
 
 	if len(matches) == 0:
-		print(f"	Error: No AP matching '{target}' found.")
+		print(f"  Error: No AP matching '{target}' found.")
 		return
 	elif len(matches) > 1:
-		print(f"	Multiple matches for '{target}' - be more specific:")
+		print(f"  Multiple matches for '{target}' - be more specific:")
 		for m in matches:
-			print(f"	{m['essid']} [{m['bssid']}]")
+			print(f"    {m['essid']} [{m['bssid']}]")
 		return
-	
+
 	ap = matches[0]
 
 	vendor = lookup_vendor(ap["bssid"], oui_db)
@@ -659,10 +630,8 @@ if __name__ == "__main__":
 	aps, clients = parse_airodump(args.file)
 	oui_db = load_oui()
 
-	# Apply filters
 	filtered = aps
 
-	# Sort by signal strength (strongest first)
 	filtered.sort(key=lambda ap: int(ap["power"]) if ap["power"].lstrip('-').isdigit() else -100, reverse=True)
 
 	if args.has_clients:
@@ -683,7 +652,6 @@ if __name__ == "__main__":
 	if args.pmkid:
 		filtered = [ap for ap in filtered if ap.get("pmkid")]
 
-	# Capture output if exporting
 	if args.output:
 		import io
 		buffer = io.StringIO()
@@ -701,35 +669,36 @@ if __name__ == "__main__":
 
 		sys.stdout = DualOutput(original_stdout, buffer)
 
-	# Determine what to show based on flag combinations
 	hidden_mode = args.hidden or args.hidden_all
 
-	# If --pmkid filter produced no results, say so and exit cleanly
 	if args.pmkid and not filtered:
 		print("  No APs with captured PMKIDs found in this scan.")
 	else:
 		if args.target:
-			# --target: always show target info
 			display_target(filtered, clients, args.target, oui_db)
 		elif not args.alerts_only and not hidden_mode:
-			# Default: show full AP list and summary
+			wps_count = sum(1 for ap in filtered if ap.get("wps"))
+			opn_count = sum(1 for ap in filtered if "OPN" in ap["encryption"])
+			hidden_count = sum(1 for ap in filtered if not ap["essid"])
+			client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
+			print()
+			print("-" * 59)
+			print(f"  {len(filtered)} APs  |  {opn_count} open  |  {wps_count} WPS  |  {hidden_count} hidden  |  {client_count} clients")
+			print("-" * 59)
+			print()
 			display_results(filtered, clients, oui_db)
 			display_stats(filtered, clients)
 
-		# Show alerts unless we're in hidden-only mode (without alerts-only pairing)
 		if not args.target and not hidden_mode:
 			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
 		elif not args.target and hidden_mode and args.alerts_only:
-			# --hidden/--hidden-all paired with --alerts-only
 			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
 
-		# Show hidden correlation if requested
 		if hidden_mode:
 			hidden_findings = correlate_hidden_ssids(filtered, clients)
 			if hidden_findings:
 				display_hidden_correlation(hidden_findings, oui_db, show_all=args.hidden_all)
 
-	# Save to file if requested
 	if args.output:
 		sys.stdout = original_stdout
 		with open(args.output, 'w', encoding='utf-8') as f:
