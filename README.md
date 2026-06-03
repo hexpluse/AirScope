@@ -1,86 +1,111 @@
 # AirScope
 
-A wireless recon decision engine that parses airodump-ng captures into prioritized, actionable intelligence. Built for wireless penetration testers who want to skip the manual note-taking and get straight to attacking.
+A wireless recon decision engine that turns raw airodump-ng captures into prioritized, actionable intelligence. Built for wireless penetration testers who want to skip the manual note-taking and get straight to attacking.
 
-AirScope analyzes and decides. It does not attack. Once you know what to hit and how, you switch to the attack tool — hostapd, wacker, eaphammer, reaver, aireplay-ng, hashcat. AirScope's job is done at that point.
+AirScope analyzes and decides. It does not attack. Once you know what to hit and how, you switch to the attack tool — hostapd, wacker, eaphammer, reaver, aireplay-ng, hashcat. AirScope's job ends there.
+
+---
+
+## Typical Workflow
+
+1. Run airodump-ng and save a CSV and PCAP
+2. Feed both to AirScope with `--alerts-only` to triage the environment in seconds
+3. Use `--target` on your priority AP for a full intelligence breakdown and attack recommendation
+4. Switch to your attack tool with everything you need already surfaced
+
+```
+python airscope.py capture.csv --pcap capture.cap --alerts-only
+python airscope.py capture.csv --pcap capture.cap --target NETWORK-NAME
+```
+
+---
 
 ## What It Does
 
-- Parses airodump-ng CSV files and displays a clean summary of all access points and clients
+**Recon and Parsing**
+- Parses airodump-ng CSV files into a clean AP and client summary
 - Enriches data with PCAP beacon frame analysis for MFP status and AKM suite details
-- Detects WPS-enabled networks from PCAP beacon frames for Pixie Dust / Reaver targeting
-- Detects PMKID presence from EAPOL frames — flags clientless offline crack viability
+- Detects WPS-enabled networks from beacon frames for Pixie Dust / Reaver targeting
+- Detects PMKID presence from EAPOL frames and flags clientless offline crack viability
 - Identifies device manufacturers via IEEE OUI database lookup
-- Maps channels to frequencies for tools like wacker that require MHz values
-- Sorts networks by signal strength — closest targets first
-- Categorizes networks by encryption type (WPA3, WPA2, WPA, Open)
-- Flags security weaknesses with prioritized alerts and MFP-aware attack recommendations
-- Target lookup by SSID with automatic attack recommendation factoring MFP, WPS, and PMKID
-- Correlates hidden SSIDs with associated client probe data to infer likely network names
+- Maps channels to frequencies for tools like wacker that require MHz input
+- Sorts networks by signal strength — closest targets listed first
+
+**Intelligence Layer**
+- Prioritized security alerts with color-coded severity levels
+- MFP-aware attack recommendations — flags when deauth is blocked and suggests alternatives
+- Hidden SSID correlation — matches hidden APs to associated client probe data to infer likely names
 - Passive captive portal detection from 802.11u IE, SSID patterns, and vendor fingerprinting
-- Identifies probing clients for evil twin / Karma targeting
-- Filters output by network type, client presence, PMKID capture, or alerts only
-- Exports results to text files for engagement documentation
+- PMKID-aware attack pivoting — switches recommendation to clientless crack when PMKID is captured
+- Probing client identification for evil twin and Karma attack targeting
+
+**Output and Filtering**
+- Filter by network type, encryption, client presence, or PMKID capture
+- Target lookup by SSID with full intelligence breakdown and copy-paste ready attack recommendation
+- Export results to text file for engagement documentation
+- Color output in terminal via colorama, with graceful fallback to plain text
+
+---
 
 ## Installation
 
-    git clone https://github.com/hexpluse/airscope.git
-    cd airscope
-    pip install scapy
+```
+git clone https://github.com/hexpluse/airscope.git
+cd airscope
+pip install scapy colorama
+```
 
 Download the OUI database for vendor detection:
 
-    python -c "import urllib.request; urllib.request.urlretrieve('https://standards-oui.ieee.org/oui/oui.txt', 'oui.txt')"
+```
+python -c "import urllib.request; urllib.request.urlretrieve('https://standards-oui.ieee.org/oui/oui.txt', 'oui.txt')"
+```
 
-Scapy and oui.txt are optional. CSV-only mode works without either — it just shows less information and tells you what's missing.
+Scapy, colorama, and oui.txt are all optional. CSV-only mode works without any of them — the tool tells you what is missing and continues with reduced output.
 
-## Usage
+---
 
-Basic scan summary:
+## Target Lookup
 
-    python airscope.py capture.csv
+The strongest feature. Run `--target` against any AP by SSID name to get a full breakdown with an automatic attack recommendation that factors in MFP status, WPS, and PMKID.
 
-Enrich with PCAP for MFP, WPS, AKM, and PMKID details:
+```
+python airscope.py capture.csv --pcap capture.cap --target NETWORK-NAME
+```
 
-    python airscope.py capture.csv --pcap capture.cap
+![AirScope target lookup](screenshots/target.png)
 
-Alerts only — fastest workflow during an engagement:
+The attack field updates based on what was captured. If MFP is Required, deauth is flagged as blocked and the recommendation pivots. If a PMKID was captured, it switches to clientless offline cracking. If WPS is enabled, it goes straight to Pixie Dust.
 
-    python airscope.py capture.csv --pcap capture.cap --alerts-only
+---
 
-Target a specific network by name:
+## Security Alerts
 
-    python airscope.py capture.csv --pcap capture.cap --target NETWORK-NAME
+```
+python airscope.py capture.csv --pcap capture.cap --alerts-only
+```
 
-Show hidden SSID correlation — infer names from client probe data:
+![AirScope alerts output](screenshots/alerts.png)
 
-    python airscope.py capture.csv --pcap capture.cap --hidden
+Alerts are sorted by priority. The color legend is shown at the top of every alerts run. Output is scoped to what matters — metadata is dimmed, attack recommendations are highlighted.
 
-Show all hidden APs including those with no client data:
+---
 
-    python airscope.py capture.csv --pcap capture.cap --hidden-all
+## Hidden SSID Correlation
 
-Filter for APs where a PMKID was captured — clientless crack targets:
+```
+python airscope.py capture.csv --pcap capture.cap --hidden
+```
 
-    python airscope.py capture.csv --pcap capture.cap --pmkid --alerts-only
+Matches hidden APs to associated client probe data to infer likely SSID names. Only shows APs where something was actually found. Use `--hidden-all` to include dead ends.
 
-Filter for transition mode networks with active clients:
-
-    python airscope.py capture.csv --transition --has-clients
-
-Export to file:
-
-    python airscope.py capture.csv --alerts-only --output report.txt
-
-Export target info for quick reference during attack setup:
-
-    python airscope.py capture.csv --pcap capture.cap --target NETWORK-NAME --output target.txt
+---
 
 ## Flags
 
 | Flag | Description |
 |------|-------------|
-| --target SSID | Show detailed info and attack recommendation for a specific AP |
+| --target SSID | Full intelligence breakdown and attack recommendation for a specific AP |
 | --alerts-only | Skip AP listing, show only security alerts |
 | --show-bssid | Include BSSID in alert output |
 | --show-clients | Show connected client MACs and vendors in alerts |
@@ -90,127 +115,69 @@ Export target info for quick reference during attack setup:
 | --enterprise | Only show enterprise (MGT) networks |
 | --pcap FILE | Enrich AP data with RSN/MFP/WPS/PMKID details from PCAP |
 | --output FILE | Export results to a text file |
-| --hidden | Show hidden SSID correlation — only APs where a likely SSID was identified from associated client probes. Composes with --alerts-only and --target. |
-| --hidden-all | Like --hidden but includes dead ends — hidden APs with no associated clients where no SSID can be inferred. |
-| --pmkid | Only show APs where a PMKID was captured. Requires --pcap. If none found, prints a clean message rather than an empty alert structure. |
+| --hidden | Hidden SSID correlation, actionable findings only |
+| --hidden-all | Hidden SSID correlation including APs with no client data |
+| --pmkid | Only show APs where a PMKID was captured. Requires --pcap |
+| --version | Print version and exit |
 
-## Example Output — Target Lookup
-
-      ── TARGET INFO ─────────────────────────────
-      SSID:        HomeNet-5G
-      BSSID:       A4:B1:C2:D3:E4:F5
-      Channel:     4
-      Frequency:   2427 MHz
-      Signal:      -46 dBm
-      Encryption:  WPA3 WPA2 CCMP
-      Auth:        SAE PSK
-      MFP:         Capable (not required)
-      WPS:         Enabled
-      PMKID:       Not found in capture
-      Captive Portal: No signals detected
-      Vendor:      Sagemcom Broadband SAS
-      Attack:      SAE Downgrade (Transition Mode)
-
-      ── CLIENTS (2) ────────────────────────────
-      A1:B2:C3:D4:E5:F6 (Unknown vendor) → Probes: HomeNet-5G
-      F6:E5:D4:C3:B2:A1 (Intel Corporate)
-
-## Example Output — Security Alerts
-
-      --------------------------------------------------
-        Security Alerts
-      --------------------------------------------------
-        [!!] = Critical  [!] = Notable  [*] = Info
-        MFP: Required = Deauth blocked
-        MFP: Capable/Disabled = Deauth viable
-
-        ── CRITICAL ────────────────────────────────
-
-        [!!] CoffeeShop_Free
-             ch:6 | 2437MHz | -52dBm | 0 client(s)
-             → OPEN → Evil twin / sniffing
-             └─ Vendor: TP-LINK TECHNOLOGIES CO.,LTD.
-
-        ── NOTABLE ─────────────────────────────────
-
-        [!]  HomeNet-5G
-             ch:4 | 2427MHz | -46dBm | 2 client(s)
-             → Transition → Downgrade | MFP: Capable (not required)
-             → WPS ENABLED → Pixie Dust / Reaver
-             └─ Vendor: Sagemcom Broadband SAS
-
-        [!]  Fios-Home
-             ch:1 | 2412MHz | -69dBm | 0 client(s)
-             → WPA2-PSK + WPS ENABLED → Pixie Dust / Reaver
-             └─ Vendor: Arcadyan Corporation
-
-        ── INFORMATIONAL ───────────────────────────
-
-        [*]  Hidden (4A:2B:8C:1D:3E:F0)
-             ch:3 | 2422MHz | -70dBm | 1 client(s)
-             → Enterprise → Fake RADIUS
-
-        ── INVESTIGATE ─────────────────────────────
-
-        [?]  A2:B4:C6:D8:E0:12 (Espressif Inc.)
-             → Probing: Office_Net
-
-## Example Output — Hidden SSID Correlation
-
-      --------------------------------------------------
-        Hidden SSID Correlation
-      --------------------------------------------------
-
-        [H]  Hidden AP — 02:CB:7A:0D:98:EF (Unknown vendor)
-             ch:1 | 2412MHz | -70dBm | WPA2 MGT
-             → Likely SSID(s): CorpNet  [from associated client probes]
-             ├─ Client: 3E:EB:84:12:43:F2 (Unknown vendor)
-                Probes: CorpNet
+---
 
 ## Captive Portal Detection
 
-AirScope performs passive captive portal detection on open networks using three independent signals:
+Passive detection only — no active probing. AirScope checks three independent signals on open networks:
 
-- **802.11u Interworking IE** — AP is advertising network access policy (strongest signal, confidence: Likely)
-- **SSID pattern matching** — matches against known portal SSIDs from carriers, hospitality chains, and inflight wifi providers
-- **Vendor fingerprinting** — OUI patterns associated with portal deployments (Aruba, Meraki, Ruckus, Nomadix, etc.)
+- 802.11u Interworking IE present in beacon frames (confidence: Likely)
+- SSID matches known portal patterns from carriers, hospitality chains, and inflight wifi providers
+- Vendor OUI matches known portal hardware (Aruba, Meraki, Ruckus, Nomadix, etc.)
 
-**This is passive inference only. Confirmation requires active association.** AirScope will always label portal findings with their confidence level and note that they are unconfirmed. A "Likely" finding means 802.11u was detected. A "Possible" finding means only SSID or vendor patterns matched.
+Findings are always labeled with confidence level and marked unconfirmed. Confirmation requires active association.
+
+---
 
 ## PMKID Detection
 
-AirScope parses EAPOL frames in the PCAP for PMKID presence. If captured, the attack recommendation in `--target` pivots to clientless offline cracking via hashcat — no deauth or associated client required.
+AirScope parses EAPOL frames in the PCAP for PMKID presence. If found, the attack recommendation in `--target` switches to clientless offline cracking via hashcat with no deauth or associated client required.
 
-**Not found in capture does not mean the AP is not vulnerable** — only that a PMKID was not present in this specific capture. Whether a PMKID is broadcast depends on the AP firmware.
+Not found in capture does not mean the AP is not vulnerable. Whether a PMKID is broadcast depends on AP firmware.
+
+---
 
 ## Dependencies
 
 - Python 3.x (standard library only for CSV mode)
 - scapy (optional, for PCAP enrichment): `pip install scapy`
+- colorama (optional, for color output): `pip install colorama`
 - oui.txt (optional, for vendor identification): download from IEEE
+
+---
 
 ## Version History
 
-- v4.4.1 — --pmkid filter flag to show only APs with captured PMKIDs
-- v4.4 — PMKID detection from EAPOL frames in PCAP
+- v4.5.3 — Color output via colorama with graceful fallback
+- v4.5.1 — --version flag
+- v4.5 — MFP-aware deauth warnings in alerts
+- v4.4.1 — --pmkid filter flag
+- v4.4 — PMKID detection from EAPOL frames
 - v4.3 — MFP-aware attack recommendations in --target
-- v4.2 — Passive captive portal detection (802.11u, SSID patterns, vendor fingerprinting)
-- v4.1 — Hidden SSID correlation with --hidden and --hidden-all flags
-- v4.0 — Target lookup with --target flag and attack recommendations
+- v4.2 — Passive captive portal detection
+- v4.1 — Hidden SSID correlation with --hidden and --hidden-all
+- v4.0 — Target lookup with --target and attack recommendations
 - v3.5 — Code cleanup
-- v3.4 — Signal strength sorting, visual redesign, --show-clients flag
+- v3.4 — Signal strength sorting, visual redesign, --show-clients
 - v3.3 — WPS detection from PCAP beacon frames
 - v3.2 — Channel-to-frequency mapping
-- v3.1 — OUI vendor lookup for manufacturer identification
+- v3.1 — OUI vendor lookup
 - v3.0 — PCAP support with scapy for RSN/MFP enrichment
 - v2.5 — Export to file with --output
 - v2.3 — Argparse filters
 - v2.2 — Security alerts with attack recommendations
 - v1.0 — CSV parsing and AP/client display
 
+---
+
 ## Author
 
-Built by hexpluse during CWPE (Certified Wireless Pentesting Expert) certification studies. Designed to automate the wireless reconnaissance workflow I found myself repeating manually during every assessment.
+Built by hexpluse during CWPE (Certified Wireless Pentesting Expert) certification studies. Designed to automate the wireless recon workflow repeated manually on every assessment.
 
 ## License
 
