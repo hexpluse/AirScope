@@ -1,6 +1,13 @@
 import sys
 import argparse
-from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
+import re
+
+try:
+	from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
+	SCAPY_AVAILABLE = True
+except ImportError:
+	SCAPY_AVAILABLE = False
+
 VERSION = "4.5.4"
 
 try:
@@ -19,6 +26,8 @@ try:
 except ImportError:
 	C_RED = C_YELLOW = C_BLUE = C_MAGENTA = C_CYAN = C_ORANGE = C_GREEN = C_DIM = C_BOLD = C_RESET = ""
 	print("  Note: install colorama for color output (pip install colorama)")
+
+ANSI_ESCAPE = re.compile(r'(\x1b\[[0-9;]*m|\[[0-9;]*m)')
 
 def load_oui(filepath="oui.txt"):
 	"""Load OUI database into a lookup dictionary"""
@@ -53,7 +62,6 @@ CHANNEL_FREQ = {
 	"149": 5745, "153": 5765, "157": 5785, "161": 5805, "165": 5825
 }
 
-# Known captive portal SSID patterns — partial matches, case-insensitive
 CAPTIVE_PORTAL_SSIDS = [
 	"xfinitywifi", "xfinity", "boingo", "attwifi", "att wifi",
 	"twc wifi", "cablewifi", "_guest", "-guest", "guest_",
@@ -63,7 +71,6 @@ CAPTIVE_PORTAL_SSIDS = [
 	"southwest wifi", "aa inflight", "gogoinflight", "gogo inflight",
 ]
 
-# Vendor OUI prefixes commonly associated with captive portal deployments
 CAPTIVE_PORTAL_VENDORS = [
 	"ruckus", "aruba", "cisco meraki", "meraki", "nomadix",
 	"aptilo", "cloud4wi", "purple wifi", "aislelabs",
@@ -75,47 +82,51 @@ def parse_airodump(filepath):
 	clients = []
 	section = None
 
-	with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-		for line in f:
-			line = line.strip()
+	try:
+		with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+			for line in f:
+				line = line.strip()
 
-			if line.startswith("BSSID, First time seen"):
-				section = "ap"
-				continue
-			elif line.startswith("Station MAC"):
-				section = "client"
-				continue
-
-			if not line:
-				continue
-
-			row = [col.strip() for col in line.split(",")]
-
-			if section == "ap" and len(row) >= 14:
-				bssid = row[0]
-				if not bssid or bssid == "BSSID" or bssid == "00:00:00:00:00:00":
+				if line.startswith("BSSID, First time seen"):
+					section = "ap"
 					continue
-				ap = {
-					"bssid": bssid,
-					"channel": row[3],
-					"encryption": row[5],
-					"cipher": row[6],
-					"auth": row[7],
-					"power": row[8] if len(row) > 8 else "0",
-					"essid": row[13],
-				}
-				aps.append(ap)
-
-			elif section == "client" and len(row) >= 7:
-				mac = row[0]
-				if not mac or mac == "Station MAC":
+				elif line.startswith("Station MAC"):
+					section = "client"
 					continue
-				client = {
-					"mac": mac,
-					"bssid": row[5],
-					"probes": row[6] if len(row) > 6 else "",
-				}
-				clients.append(client)
+
+				if not line:
+					continue
+
+				row = [col.strip() for col in line.split(",")]
+
+				if section == "ap" and len(row) >= 14:
+					bssid = row[0]
+					if not bssid or bssid == "BSSID" or bssid == "00:00:00:00:00:00":
+						continue
+					ap = {
+						"bssid": bssid,
+						"channel": row[3],
+						"encryption": row[5],
+						"cipher": row[6],
+						"auth": row[7],
+						"power": row[8] if len(row) > 8 else "0",
+						"essid": row[13],
+					}
+					aps.append(ap)
+
+				elif section == "client" and len(row) >= 7:
+					mac = row[0]
+					if not mac or mac == "Station MAC":
+						continue
+					client = {
+						"mac": mac,
+						"bssid": row[5],
+						"probes": row[6] if len(row) > 6 else "",
+					}
+					clients.append(client)
+	except FileNotFoundError:
+		print(f"  Error: File '{filepath}' not found.")
+		sys.exit(1)
 
 	return aps, clients
 
@@ -127,6 +138,7 @@ def enrich_from_pcap(filepath, aps):
 		print(f"  Warning: Could not read PCAP file — {e}")
 		print(f"  Continuing with CSV data only.")
 		return aps
+
 	for pkt in packets:
 		if not pkt.haslayer(Dot11Beacon):
 			continue
@@ -378,9 +390,6 @@ def display_stats(aps, clients):
 		else:
 			associated += 1
 
-	wps_count = sum(1 for ap in aps if ap.get("wps"))
-	client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
-
 	print("-" * 50)
 	print("  Summary")
 	print("-" * 50)
@@ -402,10 +411,7 @@ def display_target(aps, clients, target, oui_db):
 	if is_bssid:
 		matches = [a for a in aps if a["bssid"].upper() == target.upper()]
 	else:
-		# Try exact match first
 		matches = [a for a in aps if a["essid"].upper() == target.upper()]
-
-		# Fall back to fuzzy if nothing found
 		if not matches:
 			matches = [a for a in aps if target.upper() in a["essid"].upper()]
 
@@ -636,7 +642,7 @@ if __name__ == "__main__":
 
 	filtered = aps
 
-	filtered.sort(key=lambda ap: int(ap["power"]) if ap["power"].lstrip('-').isdigit() else -100, reverse=True)
+	filtered.sort(key=lambda ap: int(ap["power"].strip()) if ap["power"].strip().lstrip('-').isdigit() else -100, reverse=True)
 
 	if args.has_clients:
 		filtered = [ap for ap in filtered if any(c["bssid"] == ap["bssid"] for c in clients)]
@@ -651,7 +657,13 @@ if __name__ == "__main__":
 		filtered = [ap for ap in filtered if "MGT" in ap["auth"]]
 
 	if args.pcap:
-		filtered = enrich_from_pcap(args.pcap, filtered)
+		if SCAPY_AVAILABLE:
+			filtered = enrich_from_pcap(args.pcap, filtered)
+		else:
+			print()
+			print(f"  {C_YELLOW}Warning: scapy not installed — PCAP enrichment unavailable.{C_RESET}")
+			print(f"  Install with: pip install scapy")
+			print()
 
 	if args.pmkid:
 		filtered = [ap for ap in filtered if ap.get("pmkid")]
@@ -705,6 +717,7 @@ if __name__ == "__main__":
 
 	if args.output:
 		sys.stdout = original_stdout
+		clean_output = ANSI_ESCAPE.sub('', buffer.getvalue())
 		with open(args.output, 'w', encoding='utf-8') as f:
-			f.write(buffer.getvalue())
+			f.write(clean_output)
 		print(f"Results exported to: {args.output}")
