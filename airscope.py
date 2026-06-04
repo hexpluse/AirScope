@@ -1,6 +1,7 @@
 import sys
 import argparse
 import re
+import json
 
 try:
 	from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
@@ -8,7 +9,7 @@ try:
 except ImportError:
 	SCAPY_AVAILABLE = False
 
-VERSION = "4.5.4.1"
+VERSION = "4.6"
 
 try:
 	from colorama import init, Fore, Style
@@ -333,6 +334,59 @@ def captive_portal_signals(ap, oui_db):
 
 	return confidence, reasons
 
+def output_json(aps, clients, oui_db):
+	"""Output scan results as structured JSON"""
+	ap_list = []
+	for ap in aps:
+		ap_clients = [c for c in clients if c["bssid"] == ap["bssid"]]
+		client_list = []
+		for c in ap_clients:
+			client_list.append({
+				"mac": c["mac"],
+				"vendor": lookup_vendor(c["mac"], oui_db),
+				"probes": c.get("probes", "")
+			})
+		ap_list.append({
+			"essid": ap["essid"],
+			"bssid": ap["bssid"],
+			"channel": ap["channel"],
+			"frequency": CHANNEL_FREQ.get(ap["channel"], None),
+			"signal": ap["power"],
+			"encryption": ap["encryption"],
+			"cipher": ap["cipher"],
+			"auth": ap["auth"],
+			"mfp": ap.get("mfp", "Unknown"),
+			"wps": ap.get("wps", False),
+			"pmkid": ap.get("pmkid", False),
+			"interworking": ap.get("interworking", False),
+			"vendor": lookup_vendor(ap["bssid"], oui_db),
+			"clients": client_list
+		})
+
+	unassociated = []
+	for c in clients:
+		if "(not associated)" in c["bssid"] and c.get("probes"):
+			unassociated.append({
+				"mac": c["mac"],
+				"vendor": lookup_vendor(c["mac"], oui_db),
+				"probes": c["probes"]
+			})
+
+	output = {
+		"meta": {
+			"total_aps": len(aps),
+			"open": sum(1 for ap in aps if "OPN" in ap["encryption"]),
+			"wps": sum(1 for ap in aps if ap.get("wps")),
+			"hidden": sum(1 for ap in aps if not ap["essid"]),
+			"clients_associated": sum(1 for c in clients if "(not associated)" not in c["bssid"]),
+			"clients_probing": sum(1 for c in clients if "(not associated)" in c["bssid"])
+		},
+		"aps": ap_list,
+		"probing_clients": unassociated
+	}
+
+	print(json.dumps(output, indent=2))
+
 def display_results(aps, clients, oui_db):
 	"""Print a clean recon summary"""
 	print("=" * 50)
@@ -419,12 +473,21 @@ def display_target(aps, clients, target, oui_db):
 		print(f"  Error: No AP matching '{target}' found.")
 		return
 	elif len(matches) > 1:
-		print(f"  Multiple matches for '{target}' - be more specific:")
-		for m in matches:
-			print(f"    {m['essid']} [{m['bssid']}]")
-		return
-
-	ap = matches[0]
+		print(f"  Multiple matches for '{target}':")
+		for i, m in enumerate(matches, 1):
+			print(f"    [{i}] {m['essid']} [{m['bssid']}]")
+		try:
+			choice = int(input("  Select a number: ")) - 1
+			if 0 <= choice < len(matches):
+				ap = matches[choice]
+			else:
+				print("  Invalid selection.")
+				return
+		except ValueError:
+			print("  Invalid input.")
+			return
+	else:
+		ap = matches[0]
 
 	vendor = lookup_vendor(ap["bssid"], oui_db)
 	freq = CHANNEL_FREQ.get(ap["channel"], "?")
@@ -634,8 +697,14 @@ if __name__ == "__main__":
 	parser.add_argument("--hidden", action="store_true", help="Show hidden SSID correlation — only APs where a likely SSID was identified. Combine with --alerts-only or --target.")
 	parser.add_argument("--hidden-all", action="store_true", help="Like --hidden, but also shows hidden APs with no associated clients (dead ends included). Use when you want the full hidden AP inventory.")
 	parser.add_argument("--pmkid", action="store_true", help="Only show APs where a PMKID was captured. Requires --pcap. Use to quickly identify clientless crack targets.")
+	parser.add_argument("--open-only", action="store_true", help="Only show open networks.")
+	parser.add_argument("--no-color", action="store_true", help="Disable color output. Useful for plain terminal environments or when piping output.")
+	parser.add_argument("--json", action="store_true", help="Output scan results as JSON. Skips all formatted display. Safe to pipe to jq or other tools.")
 
 	args = parser.parse_args()
+
+	if args.no_color:
+		C_RED = C_YELLOW = C_BLUE = C_MAGENTA = C_CYAN = C_ORANGE = C_GREEN = C_DIM = C_BOLD = C_RESET = ""
 
 	aps, clients = parse_airodump(args.file)
 	oui_db = load_oui()
@@ -646,6 +715,9 @@ if __name__ == "__main__":
 
 	if args.has_clients:
 		filtered = [ap for ap in filtered if any(c["bssid"] == ap["bssid"] for c in clients)]
+
+	if args.open_only:
+		filtered = [ap for ap in filtered if "OPN" in ap["encryption"]]
 
 	if args.wpa2_only:
 		filtered = [ap for ap in filtered if "WPA2" in ap["encryption"] and "WPA3" not in ap["encryption"]]
@@ -687,33 +759,36 @@ if __name__ == "__main__":
 
 	hidden_mode = args.hidden or args.hidden_all
 
-	if args.pmkid and not filtered:
-		print("  No APs with captured PMKIDs found in this scan.")
+	if args.json:
+		output_json(filtered, clients, oui_db)
 	else:
-		if args.target:
-			display_target(filtered, clients, args.target, oui_db)
-		elif not args.alerts_only and not hidden_mode:
-			wps_count = sum(1 for ap in filtered if ap.get("wps"))
-			opn_count = sum(1 for ap in filtered if "OPN" in ap["encryption"])
-			hidden_count = sum(1 for ap in filtered if not ap["essid"])
-			client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
-			print()
-			print("-" * 59)
-			print(f"  {len(filtered)} APs  |  {opn_count} open  |  {wps_count} WPS  |  {hidden_count} hidden  |  {client_count} clients")
-			print("-" * 59)
-			print()
-			display_results(filtered, clients, oui_db)
-			display_stats(filtered, clients)
+		if args.pmkid and not filtered:
+			print("  No APs with captured PMKIDs found in this scan.")
+		else:
+			if args.target:
+				display_target(filtered, clients, args.target, oui_db)
+			elif not args.alerts_only and not hidden_mode:
+				wps_count = sum(1 for ap in filtered if ap.get("wps"))
+				opn_count = sum(1 for ap in filtered if "OPN" in ap["encryption"])
+				hidden_count = sum(1 for ap in filtered if not ap["essid"])
+				client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
+				print()
+				print("-" * 59)
+				print(f"  {len(filtered)} APs  |  {opn_count} open  |  {wps_count} WPS  |  {hidden_count} hidden  |  {client_count} clients")
+				print("-" * 59)
+				print()
+				display_results(filtered, clients, oui_db)
+				display_stats(filtered, clients)
 
-		if not args.target and not hidden_mode:
-			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
-		elif not args.target and hidden_mode and args.alerts_only:
-			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+			if not args.target and not hidden_mode:
+				display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+			elif not args.target and hidden_mode and args.alerts_only:
+				display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
 
-		if hidden_mode:
-			hidden_findings = correlate_hidden_ssids(filtered, clients)
-			if hidden_findings:
-				display_hidden_correlation(hidden_findings, oui_db, show_all=args.hidden_all)
+			if hidden_mode:
+				hidden_findings = correlate_hidden_ssids(filtered, clients)
+				if hidden_findings:
+					display_hidden_correlation(hidden_findings, oui_db, show_all=args.hidden_all)
 
 	if args.output:
 		sys.stdout = original_stdout
