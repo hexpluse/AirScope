@@ -8,7 +8,7 @@ try:
 except ImportError:
 	SCAPY_AVAILABLE = False
 
-VERSION = "4.5.4"
+VERSION = "4.5.4.1"
 
 try:
 	from colorama import init, Fore, Style
