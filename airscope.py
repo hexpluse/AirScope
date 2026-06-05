@@ -1,7 +1,15 @@
 import sys
 import argparse
-from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
-VERSION = "4.5.4"
+import re
+import json
+
+try:
+	from scapy.all import rdpcap, Dot11, Dot11Beacon, Dot11Elt, EAPOL
+	SCAPY_AVAILABLE = True
+except ImportError:
+	SCAPY_AVAILABLE = False
+
+VERSION = "4.6"
 
 try:
 	from colorama import init, Fore, Style
@@ -19,6 +27,8 @@ try:
 except ImportError:
 	C_RED = C_YELLOW = C_BLUE = C_MAGENTA = C_CYAN = C_ORANGE = C_GREEN = C_DIM = C_BOLD = C_RESET = ""
 	print("  Note: install colorama for color output (pip install colorama)")
+
+ANSI_ESCAPE = re.compile(r'(\x1b\[[0-9;]*m|\[[0-9;]*m)')
 
 def load_oui(filepath="oui.txt"):
 	"""Load OUI database into a lookup dictionary"""
@@ -53,7 +63,6 @@ CHANNEL_FREQ = {
 	"149": 5745, "153": 5765, "157": 5785, "161": 5805, "165": 5825
 }
 
-# Known captive portal SSID patterns — partial matches, case-insensitive
 CAPTIVE_PORTAL_SSIDS = [
 	"xfinitywifi", "xfinity", "boingo", "attwifi", "att wifi",
 	"twc wifi", "cablewifi", "_guest", "-guest", "guest_",
@@ -63,7 +72,6 @@ CAPTIVE_PORTAL_SSIDS = [
 	"southwest wifi", "aa inflight", "gogoinflight", "gogo inflight",
 ]
 
-# Vendor OUI prefixes commonly associated with captive portal deployments
 CAPTIVE_PORTAL_VENDORS = [
 	"ruckus", "aruba", "cisco meraki", "meraki", "nomadix",
 	"aptilo", "cloud4wi", "purple wifi", "aislelabs",
@@ -75,47 +83,51 @@ def parse_airodump(filepath):
 	clients = []
 	section = None
 
-	with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-		for line in f:
-			line = line.strip()
+	try:
+		with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+			for line in f:
+				line = line.strip()
 
-			if line.startswith("BSSID, First time seen"):
-				section = "ap"
-				continue
-			elif line.startswith("Station MAC"):
-				section = "client"
-				continue
-
-			if not line:
-				continue
-
-			row = [col.strip() for col in line.split(",")]
-
-			if section == "ap" and len(row) >= 14:
-				bssid = row[0]
-				if not bssid or bssid == "BSSID" or bssid == "00:00:00:00:00:00":
+				if line.startswith("BSSID, First time seen"):
+					section = "ap"
 					continue
-				ap = {
-					"bssid": bssid,
-					"channel": row[3],
-					"encryption": row[5],
-					"cipher": row[6],
-					"auth": row[7],
-					"power": row[8] if len(row) > 8 else "0",
-					"essid": row[13],
-				}
-				aps.append(ap)
-
-			elif section == "client" and len(row) >= 7:
-				mac = row[0]
-				if not mac or mac == "Station MAC":
+				elif line.startswith("Station MAC"):
+					section = "client"
 					continue
-				client = {
-					"mac": mac,
-					"bssid": row[5],
-					"probes": row[6] if len(row) > 6 else "",
-				}
-				clients.append(client)
+
+				if not line:
+					continue
+
+				row = [col.strip() for col in line.split(",")]
+
+				if section == "ap" and len(row) >= 14:
+					bssid = row[0]
+					if not bssid or bssid == "BSSID" or bssid == "00:00:00:00:00:00":
+						continue
+					ap = {
+						"bssid": bssid,
+						"channel": row[3],
+						"encryption": row[5],
+						"cipher": row[6],
+						"auth": row[7],
+						"power": row[8] if len(row) > 8 else "0",
+						"essid": row[13],
+					}
+					aps.append(ap)
+
+				elif section == "client" and len(row) >= 7:
+					mac = row[0]
+					if not mac or mac == "Station MAC":
+						continue
+					client = {
+						"mac": mac,
+						"bssid": row[5],
+						"probes": row[6] if len(row) > 6 else "",
+					}
+					clients.append(client)
+	except FileNotFoundError:
+		print(f"  Error: File '{filepath}' not found.")
+		sys.exit(1)
 
 	return aps, clients
 
@@ -127,6 +139,7 @@ def enrich_from_pcap(filepath, aps):
 		print(f"  Warning: Could not read PCAP file — {e}")
 		print(f"  Continuing with CSV data only.")
 		return aps
+
 	for pkt in packets:
 		if not pkt.haslayer(Dot11Beacon):
 			continue
@@ -321,6 +334,59 @@ def captive_portal_signals(ap, oui_db):
 
 	return confidence, reasons
 
+def output_json(aps, clients, oui_db):
+	"""Output scan results as structured JSON"""
+	ap_list = []
+	for ap in aps:
+		ap_clients = [c for c in clients if c["bssid"] == ap["bssid"]]
+		client_list = []
+		for c in ap_clients:
+			client_list.append({
+				"mac": c["mac"],
+				"vendor": lookup_vendor(c["mac"], oui_db),
+				"probes": c.get("probes", "")
+			})
+		ap_list.append({
+			"essid": ap["essid"],
+			"bssid": ap["bssid"],
+			"channel": ap["channel"],
+			"frequency": CHANNEL_FREQ.get(ap["channel"], None),
+			"signal": ap["power"],
+			"encryption": ap["encryption"],
+			"cipher": ap["cipher"],
+			"auth": ap["auth"],
+			"mfp": ap.get("mfp", "Unknown"),
+			"wps": ap.get("wps", False),
+			"pmkid": ap.get("pmkid", False),
+			"interworking": ap.get("interworking", False),
+			"vendor": lookup_vendor(ap["bssid"], oui_db),
+			"clients": client_list
+		})
+
+	unassociated = []
+	for c in clients:
+		if "(not associated)" in c["bssid"] and c.get("probes"):
+			unassociated.append({
+				"mac": c["mac"],
+				"vendor": lookup_vendor(c["mac"], oui_db),
+				"probes": c["probes"]
+			})
+
+	output = {
+		"meta": {
+			"total_aps": len(aps),
+			"open": sum(1 for ap in aps if "OPN" in ap["encryption"]),
+			"wps": sum(1 for ap in aps if ap.get("wps")),
+			"hidden": sum(1 for ap in aps if not ap["essid"]),
+			"clients_associated": sum(1 for c in clients if "(not associated)" not in c["bssid"]),
+			"clients_probing": sum(1 for c in clients if "(not associated)" in c["bssid"])
+		},
+		"aps": ap_list,
+		"probing_clients": unassociated
+	}
+
+	print(json.dumps(output, indent=2))
+
 def display_results(aps, clients, oui_db):
 	"""Print a clean recon summary"""
 	print("=" * 50)
@@ -378,9 +444,6 @@ def display_stats(aps, clients):
 		else:
 			associated += 1
 
-	wps_count = sum(1 for ap in aps if ap.get("wps"))
-	client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
-
 	print("-" * 50)
 	print("  Summary")
 	print("-" * 50)
@@ -402,10 +465,7 @@ def display_target(aps, clients, target, oui_db):
 	if is_bssid:
 		matches = [a for a in aps if a["bssid"].upper() == target.upper()]
 	else:
-		# Try exact match first
 		matches = [a for a in aps if a["essid"].upper() == target.upper()]
-
-		# Fall back to fuzzy if nothing found
 		if not matches:
 			matches = [a for a in aps if target.upper() in a["essid"].upper()]
 
@@ -413,12 +473,21 @@ def display_target(aps, clients, target, oui_db):
 		print(f"  Error: No AP matching '{target}' found.")
 		return
 	elif len(matches) > 1:
-		print(f"  Multiple matches for '{target}' - be more specific:")
-		for m in matches:
-			print(f"    {m['essid']} [{m['bssid']}]")
-		return
-
-	ap = matches[0]
+		print(f"  Multiple matches for '{target}':")
+		for i, m in enumerate(matches, 1):
+			print(f"    [{i}] {m['essid']} [{m['bssid']}]")
+		try:
+			choice = int(input("  Select a number: ")) - 1
+			if 0 <= choice < len(matches):
+				ap = matches[choice]
+			else:
+				print("  Invalid selection.")
+				return
+		except ValueError:
+			print("  Invalid input.")
+			return
+	else:
+		ap = matches[0]
 
 	vendor = lookup_vendor(ap["bssid"], oui_db)
 	freq = CHANNEL_FREQ.get(ap["channel"], "?")
@@ -505,6 +574,9 @@ def display_target(aps, clients, target, oui_db):
 		print()
 
 def display_alerts(aps, clients, show_bssid=False, oui_db={}, show_clients=False):
+	if oui_db is None:
+		oui_db = {}
+	
 	"""Flag security weaknesses, sorted by priority"""
 
 	alerts = []
@@ -628,18 +700,27 @@ if __name__ == "__main__":
 	parser.add_argument("--hidden", action="store_true", help="Show hidden SSID correlation — only APs where a likely SSID was identified. Combine with --alerts-only or --target.")
 	parser.add_argument("--hidden-all", action="store_true", help="Like --hidden, but also shows hidden APs with no associated clients (dead ends included). Use when you want the full hidden AP inventory.")
 	parser.add_argument("--pmkid", action="store_true", help="Only show APs where a PMKID was captured. Requires --pcap. Use to quickly identify clientless crack targets.")
+	parser.add_argument("--open-only", action="store_true", help="Only show open networks.")
+	parser.add_argument("--no-color", action="store_true", help="Disable color output. Useful for plain terminal environments or when piping output.")
+	parser.add_argument("--json", action="store_true", help="Output scan results as JSON. Skips all formatted display. Safe to pipe to jq or other tools.")
 
 	args = parser.parse_args()
+
+	if args.no_color:
+		C_RED = C_YELLOW = C_BLUE = C_MAGENTA = C_CYAN = C_ORANGE = C_GREEN = C_DIM = C_BOLD = C_RESET = ""
 
 	aps, clients = parse_airodump(args.file)
 	oui_db = load_oui()
 
 	filtered = aps
 
-	filtered.sort(key=lambda ap: int(ap["power"]) if ap["power"].lstrip('-').isdigit() else -100, reverse=True)
+	filtered.sort(key=lambda ap: int(ap["power"].strip()) if ap["power"].strip().lstrip('-').isdigit() else -100, reverse=True)
 
 	if args.has_clients:
 		filtered = [ap for ap in filtered if any(c["bssid"] == ap["bssid"] for c in clients)]
+
+	if args.open_only:
+		filtered = [ap for ap in filtered if "OPN" in ap["encryption"]]
 
 	if args.wpa2_only:
 		filtered = [ap for ap in filtered if "WPA2" in ap["encryption"] and "WPA3" not in ap["encryption"]]
@@ -651,7 +732,13 @@ if __name__ == "__main__":
 		filtered = [ap for ap in filtered if "MGT" in ap["auth"]]
 
 	if args.pcap:
-		filtered = enrich_from_pcap(args.pcap, filtered)
+		if SCAPY_AVAILABLE:
+			filtered = enrich_from_pcap(args.pcap, filtered)
+		else:
+			print()
+			print(f"  {C_YELLOW}Warning: scapy not installed — PCAP enrichment unavailable.{C_RESET}")
+			print(f"  Install with: pip install scapy")
+			print()
 
 	if args.pmkid:
 		filtered = [ap for ap in filtered if ap.get("pmkid")]
@@ -675,36 +762,40 @@ if __name__ == "__main__":
 
 	hidden_mode = args.hidden or args.hidden_all
 
-	if args.pmkid and not filtered:
-		print("  No APs with captured PMKIDs found in this scan.")
+	if args.json:
+		output_json(filtered, clients, oui_db)
 	else:
-		if args.target:
-			display_target(filtered, clients, args.target, oui_db)
-		elif not args.alerts_only and not hidden_mode:
-			wps_count = sum(1 for ap in filtered if ap.get("wps"))
-			opn_count = sum(1 for ap in filtered if "OPN" in ap["encryption"])
-			hidden_count = sum(1 for ap in filtered if not ap["essid"])
-			client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
-			print()
-			print("-" * 59)
-			print(f"  {len(filtered)} APs  |  {opn_count} open  |  {wps_count} WPS  |  {hidden_count} hidden  |  {client_count} clients")
-			print("-" * 59)
-			print()
-			display_results(filtered, clients, oui_db)
-			display_stats(filtered, clients)
+		if args.pmkid and not filtered:
+			print("  No APs with captured PMKIDs found in this scan.")
+		else:
+			if args.target:
+				display_target(filtered, clients, args.target, oui_db)
+			elif not args.alerts_only and not hidden_mode:
+				wps_count = sum(1 for ap in filtered if ap.get("wps"))
+				opn_count = sum(1 for ap in filtered if "OPN" in ap["encryption"])
+				hidden_count = sum(1 for ap in filtered if not ap["essid"])
+				client_count = sum(1 for c in clients if "(not associated)" not in c["bssid"])
+				print()
+				print("-" * 59)
+				print(f"  {len(filtered)} APs  |  {opn_count} open  |  {wps_count} WPS  |  {hidden_count} hidden  |  {client_count} clients")
+				print("-" * 59)
+				print()
+				display_results(filtered, clients, oui_db)
+				display_stats(filtered, clients)
 
-		if not args.target and not hidden_mode:
-			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
-		elif not args.target and hidden_mode and args.alerts_only:
-			display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+			if not args.target and not hidden_mode:
+				display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
+			elif not args.target and hidden_mode and args.alerts_only:
+				display_alerts(filtered, clients, args.show_bssid, oui_db, args.show_clients)
 
-		if hidden_mode:
-			hidden_findings = correlate_hidden_ssids(filtered, clients)
-			if hidden_findings:
-				display_hidden_correlation(hidden_findings, oui_db, show_all=args.hidden_all)
+			if hidden_mode:
+				hidden_findings = correlate_hidden_ssids(filtered, clients)
+				if hidden_findings:
+					display_hidden_correlation(hidden_findings, oui_db, show_all=args.hidden_all)
 
 	if args.output:
 		sys.stdout = original_stdout
+		clean_output = ANSI_ESCAPE.sub('', buffer.getvalue())
 		with open(args.output, 'w', encoding='utf-8') as f:
-			f.write(buffer.getvalue())
+			f.write(clean_output)
 		print(f"Results exported to: {args.output}")
