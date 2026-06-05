@@ -145,7 +145,7 @@ Not found in capture does not mean the AP is not vulnerable. Whether a PMKID is 
 ## Dependencies
 
 - Python 3.x (standard library only for CSV mode)
-- scapy (optional, for PCAP enrichment): `pip install scapy`
+- scapy (optional, for PCAP enrichment): `pip install scapy` — if not installed, AirScope runs in CSV-only mode and skips PCAP enrichment with a clear warning. No crash, no silent failure.
 - colorama (optional, for color output): `pip install colorama`
 - oui.txt (optional, for vendor identification): download from IEEE
 
@@ -153,7 +153,10 @@ Not found in capture does not mean the AP is not vulnerable. Whether a PMKID is 
 
 ## Version History
 
-- v4.5.3 — Color output via colorama with graceful fallback
+- v4.5.4.1 — bug fixes: scapy import guard, ANSI stripping in --output, FileNotFoundError handling, signal sort fix
+- v4.5.4 — scan summary header at top of full run with at-a-glance AP counts
+- v4.5.3 — color output via colorama with graceful fallback
+- v4.5.2 — fuzzy and BSSID targeting for --target
 - v4.5.1 — --version flag
 - v4.5 — MFP-aware deauth warnings in alerts
 - v4.4.1 — --pmkid filter flag
