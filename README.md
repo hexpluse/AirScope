@@ -52,7 +52,7 @@ python airscope.py capture.csv --pcap capture.cap --target NETWORK-NAME
 ```
 git clone https://github.com/hexpluse/airscope.git
 cd airscope
-pip install scapy colorama
+pip install -r requirements.txt
 ```
 
 Download the OUI database for vendor detection:
